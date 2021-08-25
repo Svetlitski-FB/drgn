@@ -8,13 +8,15 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.10', '3.9', '3.8', '3.7', '3.6']
-        cc: [gcc, clang]
+        cc: [gcc]
       fail-fast: false
     env:
       CC: ${{ matrix.cc }}
       CFLAGS: -Wall -Werror -g -O2
     steps:
       - uses: actions/checkout@v2
+        with:
+          submodules: 'recursive'
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
         with:
@@ -22,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install busybox-static libelf-dev libdw-dev qemu-kvm zstd ${{ matrix.cc == 'clang' && 'libomp-$(clang --version | sed -rn "s/.*clang version ([0-9]+).*/\\1/p")-dev' || '' }}
+          sudo apt-get install libcurl4-gnutls-dev gettext autopoint libbz2-dev liblzma-dev zlib1g-dev busybox-static libelf-dev libdw-dev qemu-kvm zstd ${{ matrix.cc == 'clang' && 'libomp-$(clang --version | sed -rn "s/.*clang version ([0-9]+).*/\\1/p")-dev' || '' }}
           pip install pyroute2 pre-commit
       - name: Generate version.py
         run: python setup.py --version

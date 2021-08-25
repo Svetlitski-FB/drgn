@@ -1,0 +1,3 @@
+[submodule "elfutilsfork"]
+	path = libdrgn/velfutils
+	url = git@github.com:jgkamat/elfutils.git

@@ -5,7 +5,7 @@ ACLOCAL_AMFLAGS = -I m4
 
 .DELETE_ON_ERROR:
 
-AM_CPPFLAGS = -I $(top_srcdir)/include -D_GNU_SOURCE
+AM_CPPFLAGS = -I $(top_srcdir)/include -D_GNU_SOURCE -Iinclude
 AM_CFLAGS = $(SANITIZER_CFLAGS)
 AM_LDFLAGS= $(SANITIZER_LDFLAGS)
 
@@ -23,6 +23,8 @@ ARCH_INCS = $(ARCH_DEFS:.defs=.inc)
 BUILT_SOURCES = drgn.h $(ARCH_INCS) c_keywords.inc linux_kernel_object_find.inc
 
 noinst_LTLIBRARIES = libdrgnimpl.la
+
+SUBDIRS = velfutils include
 
 libdrgnimpl_la_SOURCES = $(ARCH_DEFS:.defs=.c) \
 			 $(ARCH_INCS) \
@@ -117,11 +119,13 @@ drgn.h: drgn.h.in configure.ac
 		-e 's/@DRGN_VERSION_PATCH@/$(word 3,$(subst ., ,@PACKAGE_VERSION@))/g' \
 		$< > $@
 
+elfutils_LIBS = velfutils/libdw/libdw.a velfutils/libelf/libelf.a -lz -llzma -lbz2
+
 lib_LTLIBRARIES = libdrgn.la
 
 libdrgn_la_SOURCES =
 libdrgn_la_LDFLAGS = $(AM_LDFLAGS) -version-info 0:0:0
-libdrgn_la_LIBADD = libdrgnimpl.la
+libdrgn_la_LIBADD = libdrgnimpl.la $(elfutils_LIBS)
 
 if ENABLE_PYTHON
 BUILT_SOURCES += python/docstrings.h
@@ -152,7 +156,7 @@ _drgn_la_CPPFLAGS = $(AM_CPPFLAGS) $(PYTHON_CPPFLAGS) -iquote $(srcdir)/python \
 		    -iquote python
 _drgn_la_LDFLAGS = $(AM_LDFLAGS) -Wl,--exclude-libs,ALL -avoid-version -module \
 		   -shared -rpath $(pkgpyexecdir)
-_drgn_la_LIBADD = libdrgnimpl.la
+_drgn_la_LIBADD = libdrgnimpl.la $(elfutils_LIBS)
 
 if WITH_LIBKDUMPFILE
 _drgn_la_CFLAGS += $(libkdumpfile_CFLAGS)
