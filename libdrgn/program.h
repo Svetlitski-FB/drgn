@@ -129,6 +129,7 @@ struct drgn_program {
 	 */
 	struct drgn_object_index oindex;
 	struct drgn_debug_info *dbinfo;
+	struct Dwarf *dwarf;
 
 	/*
 	 * Program information.
