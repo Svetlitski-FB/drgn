@@ -17,6 +17,7 @@
 // IWYU pragma: end_exports
 
 #include <assert.h>
+#include <elfutils/libdw.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -853,6 +854,10 @@ drgn_program_find_symbol_by_address(struct drgn_program *prog, uint64_t address,
 struct drgn_error *drgn_program_find_symbol_by_name(struct drgn_program *prog,
 						    const char *name,
 						    struct drgn_symbol **ret);
+
+struct drgn_error *drgn_program_find_type_by_symbol_name(
+    struct drgn_program *prog, const char *name,
+    struct drgn_qualified_type *ret, Dwarf_Die *die_ret);
 
 /**
  * Get all global and local symbols, optionally with the given name.
