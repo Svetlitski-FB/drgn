@@ -4729,18 +4729,10 @@ drgn_type_from_dwarf_internal(struct drgn_debug_info *dbinfo,
 			      bool *is_incomplete_array_ret,
 			      struct drgn_qualified_type *ret);
 
-/**
- * Parse a type from a DWARF debugging information entry.
- *
- * @param[in] dbinfo Debugging information.
- * @param[in] module Module containing @p die.
- * @param[in] die DIE to parse.
- * @param[out] ret Returned type.
- * @return @c NULL on success, non-@c NULL on error.
- */
-static inline struct drgn_error *
-drgn_type_from_dwarf(struct drgn_debug_info *dbinfo, struct drgn_module *module,
-		     Dwarf_Die *die, struct drgn_qualified_type *ret)
+struct drgn_error *
+drgn_type_from_dwarf(struct drgn_debug_info *dbinfo,
+		     struct drgn_module *module, Dwarf_Die *die,
+		     struct drgn_qualified_type *ret)
 {
 	return drgn_type_from_dwarf_internal(dbinfo, module, die, true, NULL,
 					     ret);
