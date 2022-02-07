@@ -1851,6 +1851,8 @@ struct find_symbol_by_name_arg {
 	GElf_Addr addr;
 	bool found;
 	bool bad_symtabs;
+	Dwfl_Module *dwfl_module;
+	Dwarf_Addr bias;
 };
 
 static int find_symbol_by_name_cb(Dwfl_Module *dwfl_module, void **userdatap,
@@ -1870,9 +1872,10 @@ static int find_symbol_by_name_cb(Dwfl_Module *dwfl_module, void **userdatap,
 	for (int i = symtab_len - 1; i > 0; i--) {
 		GElf_Sym sym;
 		GElf_Addr addr;
+		Dwarf_Addr bias;
 		const char *name = dwfl_module_getsym_info(dwfl_module, i, &sym,
 							   &addr, NULL, NULL,
-							   NULL);
+							   &bias);
 		if (name && strcmp(arg->name, name) == 0) {
 			/*
 			 * The order of precedence is
@@ -1891,6 +1894,8 @@ static int find_symbol_by_name_cb(Dwfl_Module *dwfl_module, void **userdatap,
 				arg->sym = sym;
 				arg->addr = addr;
 				arg->found = true;
+				arg->dwfl_module = dwfl_module;
+				arg->bias = bias;
 			}
 			if (GELF_ST_BIND(sym.st_info) == STB_GLOBAL ||
 			    GELF_ST_BIND(sym.st_info) == STB_GNU_UNIQUE)
@@ -1918,6 +1923,78 @@ drgn_program_find_symbol_by_name(struct drgn_program *prog,
 			*ret = sym;
 			return NULL;
 		}
+	}
+	return drgn_error_format(DRGN_ERROR_LOOKUP,
+				 "could not find symbol with name '%s'%s", name,
+				 arg.bad_symtabs ?
+				 " (could not get some symbol tables)" : "");
+}
+
+bool
+drgn_traverse_die_for_pc(Dwarf_Die die, Dwarf_Addr pc_addr, Dwarf_Die *ret) {
+	Dwarf_Die child;
+
+	if (dwarf_haspc(&die, pc_addr)) {
+		*ret = die;
+		return true;
+	}
+
+	if (dwarf_child(&die, &child) == 0
+	    && drgn_traverse_die_for_pc(child, pc_addr, ret))
+		return true;
+
+
+	if (dwarf_siblingof(&die, &child) == 0)
+		return drgn_traverse_die_for_pc(child, pc_addr, ret);
+	return false;
+}
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_program_find_type_by_symbol_name(struct drgn_program *prog,
+				      const char* name, struct drgn_qualified_type *ret,
+				      Dwarf_Die *die_ret)
+{
+	struct find_symbol_by_name_arg arg = {
+		.name = name,
+	};
+
+	if (prog->dbinfo) {
+		dwfl_getmodules(prog->dbinfo->dwfl, find_symbol_by_name_cb, &arg, 0);
+		if (arg.found) {
+			Dwarf_Addr prog_addr = arg.addr - arg.bias;
+			Dwarf_Die die;
+			Dwarf* dwarf = dwfl_module_getdwarf(arg.dwfl_module, &arg.bias);
+			if (!dwarf)
+				return drgn_error_libdwfl();
+
+
+			if (dwarf_addrdie(dwarf, prog_addr, &die) == NULL) {
+				// addrdie is broken probably due to missing aranges
+				Dwarf_Die *die_ptr = NULL;
+				while ((die_ptr = dwfl_module_nextcu(arg.dwfl_module, die_ptr, &arg.bias)) &&
+					   !dwarf_haspc(die_ptr, prog_addr));
+
+				if (die_ptr == NULL)
+					return drgn_error_format(DRGN_ERROR_LOOKUP,
+								 "Could not look up die at address 0x%lx", prog_addr);
+				die = *die_ptr;
+			}
+			if (dwarf_child(&die, &die) == 0) {
+				void **userdatap;
+				dwfl_module_info(arg.dwfl_module, &userdatap, NULL, NULL, NULL, NULL, NULL, NULL);
+				struct drgn_module *module = *userdatap;
+				Dwarf_Die die_found;
+				if (drgn_traverse_die_for_pc(die, prog_addr, &die_found)) {
+					struct drgn_error* err = drgn_type_from_dwarf(prog->dbinfo, module->debug_file, &die_found, ret);
+					if (die_ret)
+						*die_ret = die_found;
+					return err;
+				}
+			}
+		}
+		/* if (arg.err) */
+		/* 	return arg.err; */
+		// If this dosen't trigger, it seems like the type is here, but no definition is present (maybe?)
 	}
 	return drgn_error_format(DRGN_ERROR_LOOKUP,
 				 "could not find symbol with name '%s'%s", name,
