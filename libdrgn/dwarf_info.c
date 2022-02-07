@@ -5556,6 +5556,51 @@ out:
 	return err;
 }
 
+DEFINE_VECTOR(str_vector, const char*)
+static struct drgn_error *
+find_namespace_path(Dwarf_Die current, Dwarf_Die *target, struct str_vector *vec)
+{
+	Dwarf_Die child;
+
+	while (dwarf_siblingof(&current, &child) == 0
+	       && child.addr <= target->addr) {
+		// Skip past addresses which are lower even after a skip
+		current = child;
+	}
+
+	if (current.addr == target->addr)
+		return NULL;
+	if (current.addr > target->addr)
+		return drgn_error_libdw();
+
+	// Now all there is do do is dig
+	if (dwarf_tag(&current) == DW_TAG_namespace ||
+	    dwarf_tag(&current) == DW_TAG_class_type) {
+		const char* name;
+		// Handle type units on class dies
+		{
+			Dwarf_Die type_unit_die;
+			Dwarf_Attribute attr_mem;
+			Dwarf_Attribute *attr;
+			if ((attr = dwarf_attr_integrate(&current, DW_AT_signature, &attr_mem))) {
+				if (!dwarf_formref_die(attr, &type_unit_die))
+					return drgn_error_format(DRGN_ERROR_OTHER,
+								 "tag 0x%x has invalid DW_AT_signature", dwarf_tag(&current));
+				name = dwarf_diename(&type_unit_die);
+			} else {
+				name = dwarf_diename(&current);
+			}
+		}
+
+		if (!str_vector_append(vec, &name))
+			return &drgn_enomem;
+	}
+
+	if (dwarf_child(&current, &child) == 0)
+		return find_namespace_path(child, target, vec);
+	return drgn_error_libdw();
+}
+
 /*
  * DW_TAG_structure_type, DW_TAG_union_type, DW_TAG_class_type, and
  * DW_TAG_enumeration_type can be incomplete (i.e., have a DW_AT_declaration of
@@ -5590,7 +5635,51 @@ drgn_debug_info_find_complete(struct drgn_debug_info *dbinfo, uint64_t tag,
 	struct drgn_dwarf_index_die *index_die =
 		drgn_dwarf_index_iterator_next(&it);
 	if (!index_die)
-		return &drgn_not_found;
+	{
+		struct str_vector vec;
+		str_vector_init(&vec);
+
+		Dwarf_Die cu_die;
+		dwarf_cu_die(incomplete_die->cu, &cu_die,
+			     NULL, NULL, NULL, NULL, NULL, NULL);
+
+		if ((err = find_namespace_path(cu_die, incomplete_die, &vec))) {
+			err = &drgn_not_found;
+			goto err;
+		}
+
+		struct drgn_namespace_dwarf_index *ns = &dbinfo->dwarf.global;
+		uint64_t ns_tag = DW_TAG_namespace;
+		for (int i = 0; i < vec.size; i++) {
+			err = drgn_dwarf_index_iterator_init(&it, ns, vec.data[i],
+							     strlen(vec.data[i]), &ns_tag, 1);
+			if (err)
+				goto err;
+			index_die = drgn_dwarf_index_iterator_next(&it);
+			if (!index_die && (tag == DW_TAG_class_type || tag == DW_TAG_structure_type)) {
+				uint64_t class_tags[] = {DW_TAG_class_type, DW_TAG_structure_type};
+				err = drgn_dwarf_index_iterator_init(&it, ns, name, strlen(name), class_tags, 2);
+				if (err)
+					goto err;
+				index_die = drgn_dwarf_index_iterator_next(&it);
+			}
+			if (!index_die) {
+				err = &drgn_not_found;
+				goto err;
+			}
+			ns = index_die->namespace;
+		}
+		err = drgn_dwarf_index_iterator_init(&it, ns, name, strlen(name), &tag, 1);
+		if (err)
+			goto err;
+		index_die = drgn_dwarf_index_iterator_next(&it);
+		if (!index_die)
+			err = &drgn_not_found;
+	err:
+		str_vector_deinit(&vec);
+		if (err)
+			return err;
+	}
 	/*
 	 * Look for another matching DIE. If there is one, then we can't be sure
 	 * which type this is, so leave it incomplete rather than guessing.
