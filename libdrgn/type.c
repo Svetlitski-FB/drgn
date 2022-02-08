@@ -522,6 +522,7 @@ drgn_template_parameters_builder_add(struct drgn_template_parameters_builder *bu
 	parameter->argument = *argument;
 	parameter->name = name;
 	parameter->is_default = is_default;
+	parameter->bit_offset = 0;
 	return NULL;
 }
 
@@ -535,6 +536,7 @@ void drgn_compound_type_builder_init(struct drgn_compound_type_builder *builder,
 	       kind == DRGN_TYPE_UNION ||
 	       kind == DRGN_TYPE_CLASS);
 	drgn_template_parameters_builder_init(&builder->template_builder, prog);
+	drgn_template_parameters_builder_init(&builder->parents_builder, prog);
 	builder->kind = kind;
 	drgn_type_member_vector_init(&builder->members);
 }
@@ -546,6 +548,7 @@ drgn_compound_type_builder_deinit(struct drgn_compound_type_builder *builder)
 		drgn_lazy_object_deinit(&builder->members.data[i].object);
 	drgn_type_member_vector_deinit(&builder->members);
 	drgn_template_parameters_builder_deinit(&builder->template_builder);
+	drgn_template_parameters_builder_deinit(&builder->parents_builder);
 }
 
 struct drgn_error *
@@ -630,6 +633,8 @@ drgn_compound_type_create(struct drgn_compound_type_builder *builder,
 		builder->template_builder.parameters.data;
 	type->_private.num_template_parameters =
 		builder->template_builder.parameters.size;
+	type->_private.parents = builder->parents_builder.parameters.data;
+	type->_private.num_parents = builder->parents_builder.parameters.size;
 	type->_private.program = prog;
 	type->_private.language = lang ? lang : drgn_program_language(prog);
 	*ret = type;

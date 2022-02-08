@@ -6068,6 +6068,22 @@ drgn_compound_type_from_dwarf(struct drgn_debug_info *dbinfo,
 			if (err)
 				goto err;
 			break;
+		case DW_TAG_inheritance:
+			err = parse_template_parameter(dbinfo, module, &child,
+						       drgn_dwarf_template_value_parameter_thunk_fn,
+						       &builder.parents_builder);
+			if (err)
+				goto err;
+			// Parse inheritance offset
+			err = parse_member_offset(&child,
+						  &builder.parents_builder.parameters.data[
+							  builder.parents_builder.parameters.size - 1].argument,
+						  little_endian,
+						  &builder.parents_builder.parameters.data[
+							  builder.parents_builder.parameters.size - 1].bit_offset);
+			if (err)
+				goto err;
+			break;
 		default:
 			break;
 		}
