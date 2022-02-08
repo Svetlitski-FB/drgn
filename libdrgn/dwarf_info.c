@@ -6994,6 +6994,47 @@ struct drgn_error *drgn_debug_info_find_type(enum drgn_type_kind kind,
 }
 
 struct drgn_error *
+drgn_debug_info_find_object_in_type_die(struct drgn_dwarf_index_die *index_die,
+					struct drgn_debug_info *dbinfo,
+					const char* name,
+					struct drgn_object *ret) {
+	struct drgn_error *err;
+	Dwarf_Die die;
+	struct drgn_qualified_type type;
+
+
+	if ((err = drgn_dwarf_index_get_die(index_die, &die)))
+		return err;
+	if ((err = drgn_type_from_dwarf(dbinfo, index_die->module, &die, &type)))
+		return err;
+
+	if (!drgn_type_has_members(type.type)) {
+		return drgn_error_format(DRGN_ERROR_OTHER,
+					 "Internal Error parsing :: on tag: %x",
+					 index_die->tag);
+	}
+
+	struct drgn_type_member *members = drgn_type_members(type.type);
+
+	for (int i = 0; i < drgn_type_num_members(type.type); i++) {
+		if (strcmp(members[i].name, name) == 0) {
+			// We found our member (hopefully)
+			const struct drgn_object* obj;
+			err = drgn_member_object(&members[i], &obj);
+			if (err)
+				return err;
+			drgn_object_init(ret, drgn_object_program(obj));
+			err = drgn_object_copy(ret, obj);
+			if (err)
+				return err;
+			// *ret = obj;
+			return NULL;
+		}
+	}
+	return &drgn_stop;
+}
+
+struct drgn_error *
 drgn_debug_info_find_object(const char *name, size_t name_len,
 			    const char *filename,
 			    enum drgn_find_object_flags flags, void *arg,
@@ -7009,17 +7050,31 @@ drgn_debug_info_find_object(const char *name, size_t name_len,
 		name += 2;
 	}
 	const char *colons;
+	uint64_t tag_array[] = {
+		DW_TAG_namespace,
+		DW_TAG_class_type,
+		DW_TAG_structure_type,
+		DW_TAG_union_type,
+	};
+	size_t tag_array_len = 4;
 	while ((colons = memmem(name, name_len, "::", 2))) {
 		struct drgn_dwarf_index_iterator it;
-		uint64_t ns_tag = DW_TAG_namespace;
 		err = drgn_dwarf_index_iterator_init(&it, ns, name,
-						     colons - name, &ns_tag, 1);
+						     colons - name, tag_array, tag_array_len);
 		if (err)
 			return err;
 		struct drgn_dwarf_index_die *index_die =
 			drgn_dwarf_index_iterator_next(&it);
 		if (!index_die)
 			return &drgn_not_found;
+		if (index_die->tag != DW_TAG_namespace) {
+			err = drgn_debug_info_find_object_in_type_die(index_die, dbinfo, colons + 2, ret);
+			if (err && err != &drgn_stop)
+				return err;
+			if (!err)
+				return NULL;
+			break;
+		}
 		ns = index_die->namespace;
 		name_len -= colons + 2 - name;
 		name = colons + 2;
