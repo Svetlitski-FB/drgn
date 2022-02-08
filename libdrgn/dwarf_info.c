@@ -2298,10 +2298,11 @@ skip:
 				    (err = read_strx(buffer, comp_dir_strx,
 						     &comp_dir)))
 					return err;
-				if ((err = read_file_name_table(path_hash_cache,
-								cu, comp_dir,
-								stmt_list)))
-					return err;
+				if (false) // Disable filenames for performance
+					if ((err = read_file_name_table(path_hash_cache,
+									cu, comp_dir,
+									stmt_list)))
+						return err;
 			}
 		} else if (specification) {
 			if (insn & INSN_DIE_FLAG_DECLARATION)
@@ -2775,6 +2776,7 @@ skip:
 
 			uint64_t file_name_hash;
 			if (decl_file_ptr) {
+				decl_file = 0; // Disable filenames for performance
 				if (decl_file >= cu->num_file_names) {
 					return binary_buffer_error_at(&buffer->bb,
 								      decl_file_ptr,
