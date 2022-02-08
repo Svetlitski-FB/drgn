@@ -206,6 +206,7 @@ DEFINE_VECTOR_TYPE(drgn_type_member_vector, struct drgn_type_member)
 /** Builder for members of a structure, union, or class type. */
 struct drgn_compound_type_builder {
 	struct drgn_template_parameters_builder template_builder;
+	struct drgn_template_parameters_builder parents_builder;
 	enum drgn_type_kind kind;
 	struct drgn_type_member_vector members;
 };
