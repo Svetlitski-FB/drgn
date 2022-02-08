@@ -146,6 +146,7 @@ _drgn_la_SOURCES = python/constants.c \
 		   python/drgnpy.h \
 		   python/error.c \
 		   python/helpers.c \
+		   python/inlined.c \
 		   python/language.c \
 		   python/main.c \
 		   python/object.c \
