@@ -2769,6 +2769,12 @@ skip:
 
 next:
 		if (insn & INSN_DIE_FLAG_CHILDREN) {
+			if (name && tag == DW_TAG_class_type) {
+			  // Add a fake namespace representing the innards of a class.
+			  if (!index_die(ns, cu, name,
+			      DW_TAG_namespace, 0, cu->module, die_addr))
+				return &drgn_enomem;
+			}
 			/*
 			 * We must descend into the children of enumeration_type
 			 * DIEs to index enumerator DIEs. We don't want to skip
