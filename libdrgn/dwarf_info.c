@@ -7047,6 +7047,47 @@ struct drgn_error *drgn_debug_info_find_type(enum drgn_type_kind kind,
 }
 
 struct drgn_error *
+drgn_debug_info_find_object_in_type_die(struct drgn_dwarf_index_die *index_die,
+					struct drgn_debug_info *dbinfo,
+					const char* name,
+					struct drgn_object *ret) {
+	struct drgn_error *err;
+	Dwarf_Die die;
+	struct drgn_qualified_type type;
+
+
+	if ((err = drgn_dwarf_index_get_die(index_die, &die)))
+		return err;
+	if ((err = drgn_type_from_dwarf(dbinfo, index_die->file, &die, &type)))
+		return err;
+
+	if (!drgn_type_has_members(type.type)) {
+		return drgn_error_format(DRGN_ERROR_OTHER,
+					 "Internal Error parsing :: on tag: %x",
+					 index_die->tag);
+	}
+
+	struct drgn_type_member *members = drgn_type_members(type.type);
+
+	for (int i = 0; i < drgn_type_num_members(type.type); i++) {
+		if (strcmp(members[i].name, name) == 0) {
+			// We found our member (hopefully)
+			const struct drgn_object* obj;
+			err = drgn_member_object(&members[i], &obj);
+			if (err)
+				return err;
+			drgn_object_init(ret, drgn_object_program(obj));
+			err = drgn_object_copy(ret, obj);
+			if (err)
+				return err;
+			// *ret = obj;
+			return NULL;
+		}
+	}
+	return &drgn_stop;
+}
+
+struct drgn_error *
 drgn_debug_info_find_object(const char *name, size_t name_len,
 			    const char *filename,
 			    enum drgn_find_object_flags flags, void *arg,
