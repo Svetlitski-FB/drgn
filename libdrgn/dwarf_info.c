@@ -44,6 +44,7 @@ static inline int omp_get_max_threads(void)
 #include "serialize.h"
 #include "type.h"
 #include "util.h"
+#include "dwarf_info.h"
 
 void drgn_module_dwarf_info_deinit(struct drgn_module *module)
 {
@@ -60,14 +61,25 @@ DEFINE_HASH_TABLE_FUNCTIONS(drgn_dwarf_specification_map,
 			    drgn_dwarf_specification_to_key, int_key_hash_pair,
 			    scalar_key_eq)
 
+
 DEFINE_HASH_SET_FUNCTIONS(uintptr_set, int_key_hash_pair, scalar_key_eq)
 DEFINE_HASH_MAP_FUNCTIONS(drgn_inlined_map, int_key_hash_pair, scalar_key_eq)
+DEFINE_HASH_TABLE_FUNCTIONS(drgn_inlined_group_set, drgn_inlined_group_to_key,
+			    c_string_key_hash_pair, c_string_key_eq)
 
 static void drgn_inlined_map_deep_deinit(struct drgn_inlined_map *inlined_map) {
 	for (struct drgn_inlined_map_iterator iter = drgn_inlined_map_first(inlined_map);
 	     iter.entry; iter = drgn_inlined_map_next(iter))
 		uintptr_set_deinit(&iter.entry->value);
 	drgn_inlined_map_deinit(inlined_map);
+}
+
+static void drgn_inlined_group_set_deep_deinit(struct drgn_inlined_group_set *set) {
+	for (struct drgn_inlined_group_set_iterator iter =
+		 drgn_inlined_group_set_first(set);
+	     iter.entry; iter = drgn_inlined_group_set_next(iter))
+		drgn_inlined_group_deinit(iter.entry);
+	drgn_inlined_group_set_deinit(set);
 }
 
 /**
@@ -247,6 +259,7 @@ void drgn_dwarf_info_init(struct drgn_debug_info *dbinfo)
 	drgn_dwarf_type_map_init(&dbinfo->dwarf.types);
 	drgn_dwarf_type_map_init(&dbinfo->dwarf.cant_be_incomplete_array_types);
 	drgn_inlined_map_init(&dbinfo->dwarf.inlined_map);
+	dbinfo->dwarf.inlined_group_set_populated = false;
 	dbinfo->dwarf.depth = 0;
 }
 
@@ -268,6 +281,8 @@ void drgn_dwarf_info_deinit(struct drgn_debug_info *dbinfo)
 	drgn_dwarf_specification_map_deinit(&dbinfo->dwarf.specifications);
 	drgn_namespace_dwarf_index_deinit(&dbinfo->dwarf.global);
 	drgn_inlined_map_deep_deinit(&dbinfo->dwarf.inlined_map);
+	if (dbinfo->dwarf.inlined_group_set_populated)
+		drgn_inlined_group_set_deep_deinit(&dbinfo->dwarf.inlined_group_set);
 }
 
 struct drgn_inlined_functions_iterator {
@@ -281,17 +296,29 @@ struct drgn_inlined_functions_iterator {
 	size_t capacity;
 };
 
+void drgn_inlined_functions_iterator_init(
+	struct drgn_program *prog, struct drgn_inlined_functions_iterator *ret)
+{
+	*ret = (struct drgn_inlined_functions_iterator){
+		.inlined_map = &prog->dbinfo->dwarf.inlined_map,
+		.dwarf = prog->dwarf};
+}
+
 LIBDRGN_PUBLIC
 struct drgn_error *drgn_inlined_functions_iterator_create(
 	struct drgn_program* prog,
 	struct drgn_inlined_functions_iterator **ret)
 {
-	*ret = calloc(1, sizeof(**ret));
+	*ret = malloc(sizeof(**ret));
 	if (!*ret)
 		return &drgn_enomem;
-	(*ret)->inlined_map = &prog->dbinfo->dwarf.inlined_map;
-	(*ret)->dwarf = prog->dwarf;
+	drgn_inlined_functions_iterator_init(prog, *ret);
 	return NULL;
+}
+
+static void drgn_inlined_functions_iterator_deinit(struct drgn_inlined_functions_iterator *it)
+{
+	free(it->entry.inlined_instances);
 }
 
 LIBDRGN_PUBLIC
@@ -299,7 +326,7 @@ void drgn_inlined_functions_iterator_destroy(
 	struct drgn_inlined_functions_iterator *it)
 {
 	if (it) {
-		free(it->entry.inlined_instances);
+		drgn_inlined_functions_iterator_deinit(it);
 		free(it);
 	}
 }
@@ -405,6 +432,36 @@ void drgn_inlined_group_destroy(struct drgn_inlined_group *group) {
 		drgn_inlined_group_deinit(group);
 		free(group);
 	}
+}
+
+struct drgn_error *drgn_program_populate_inlined_group_set(struct drgn_program* prog) {
+	assert(!prog->dbinfo->dwarf.inlined_group_set_populated);
+	struct drgn_inlined_group_set *set = &prog->dbinfo->dwarf.inlined_group_set;
+	drgn_inlined_group_set_init(set);
+	struct drgn_inlined_functions_iterator it;
+	drgn_inlined_functions_iterator_init(prog, &it);
+	struct drgn_error *err = NULL;
+	if (!drgn_inlined_group_set_reserve(set, drgn_inlined_map_size(it.inlined_map))) {
+		err = &drgn_enomem;
+		goto out;
+	}
+	struct drgn_inlined_group *group;
+	struct drgn_inlined_group_set_iterator entry;
+	while (!(err = drgn_inlined_functions_iterator_next(&it, &group)) && group) {
+		if (group->linkage_name) {
+			drgn_inlined_group_set_insert(set, group, &entry);
+			err = drgn_inlined_group_dup_internal(group, entry.entry);
+			if (err)
+				break;
+		}
+	}
+	out:
+	drgn_inlined_functions_iterator_deinit(&it);
+	if (err)
+		drgn_inlined_group_set_deep_deinit(set);
+	else
+		prog->dbinfo->dwarf.inlined_group_set_populated = true;
+	return err;
 }
 
 /*
@@ -7283,6 +7340,7 @@ drgn_type_from_dwarf_internal(struct drgn_debug_info *dbinfo,
 		break;
 	case DW_TAG_subroutine_type:
 	case DW_TAG_subprogram:
+	case DW_TAG_inlined_subroutine:
 		err = drgn_function_type_from_dwarf(dbinfo, module, die, lang,
 						    &ret->type);
 		break;

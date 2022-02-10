@@ -1916,6 +1916,23 @@ static int find_symbol_by_name_cb(Dwfl_Module *dwfl_module, void **userdatap,
 	return DWARF_CB_OK;
 }
 
+DEFINE_HASH_TABLE_FUNCTIONS(drgn_inlined_group_set, drgn_inlined_group_to_key,
+			    c_string_key_hash_pair, c_string_key_eq)
+
+static struct drgn_error *find_inlined_instance(struct drgn_program *prog, const char *name, struct drgn_inlined_instance *ret) {
+	if (!prog->dbinfo->dwarf.inlined_group_set_populated) {
+		struct drgn_error *err = drgn_program_populate_inlined_group_set(prog);
+		if (err)
+			return err;
+	}
+	struct drgn_inlined_group* group = drgn_inlined_group_set_search(&prog->dbinfo->dwarf.inlined_group_set, &name).entry;
+	if (!group)
+		return drgn_error_format(DRGN_ERROR_LOOKUP, "could not find symbol with name '%s'", name);
+	assert(group->num_inlined_instances > 0);
+	*ret = group->inlined_instances[0];
+	return NULL;
+}
+
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_program_find_symbol_by_name(struct drgn_program *prog,
 			const char *name, struct drgn_symbol **ret)
@@ -1926,14 +1943,24 @@ drgn_program_find_symbol_by_name(struct drgn_program *prog,
 	if (prog->dbinfo) {
 		dwfl_getmodules(prog->dbinfo->dwfl, find_symbol_by_name_cb,
 				&arg, 0);
-		if (arg.found) {
-			struct drgn_symbol *sym = malloc(sizeof(*sym));
-			if (!sym)
-				return &drgn_enomem;
-			drgn_symbol_from_elf(name, arg.addr, &arg.sym, sym);
-			*ret = sym;
-			return NULL;
+		struct drgn_inlined_instance instance;
+		if (!arg.found) {
+			struct drgn_error *err = find_inlined_instance(prog, name, &instance);
+			if (err)
+				return err;
 		}
+
+		struct drgn_symbol *sym = malloc(sizeof(*sym));
+		if (!sym)
+			return &drgn_enomem;
+
+		if (arg.found)
+			drgn_symbol_from_elf(name, arg.addr, &arg.sym, sym);
+		else
+			// TODO: Leaving other fields not explicitly set for now, need to see if this causes any issues
+			*sym = (struct drgn_symbol){.address = instance.entry_pc, .name = name, .size = (instance.high_pc - instance.entry_pc)};
+		*ret = sym;
+		return NULL;
 	}
 	return drgn_error_format(DRGN_ERROR_LOOKUP,
 				 "could not find symbol with name '%s'%s", name,
@@ -1969,44 +1996,64 @@ drgn_program_find_type_by_symbol_name(struct drgn_program *prog,
 		.name = name,
 	};
 
-	if (prog->dbinfo) {
-		dwfl_getmodules(prog->dbinfo->dwfl, find_symbol_by_name_cb, &arg, 0);
-		if (arg.found) {
-			Dwarf_Addr prog_addr = arg.addr - arg.bias;
-			Dwarf_Die die;
-			Dwarf* dwarf = dwfl_module_getdwarf(arg.dwfl_module, &arg.bias);
-			if (!dwarf)
-				return drgn_error_libdwfl();
+	if (!prog->dbinfo)
+		goto err;
 
+	dwfl_getmodules(prog->dbinfo->dwfl, find_symbol_by_name_cb, &arg, 0);
+	Dwarf_Die die;
+	Dwfl_Module *dwfl_module;
+	if (arg.found) {
+		Dwarf_Addr prog_addr = arg.addr - arg.bias;
+		Dwarf* dwarf = dwfl_module_getdwarf(arg.dwfl_module, &arg.bias);
+		if (!dwarf)
+			return drgn_error_libdwfl();
 
-			if (dwarf_addrdie(dwarf, prog_addr, &die) == NULL) {
-				// addrdie is broken probably due to missing aranges
-				Dwarf_Die *die_ptr = NULL;
-				while ((die_ptr = dwfl_module_nextcu(arg.dwfl_module, die_ptr, &arg.bias)) &&
-					   !dwarf_haspc(die_ptr, prog_addr));
+		if (dwarf_addrdie(dwarf, prog_addr, &die) == NULL) {
+			// addrdie is broken probably due to missing aranges
+			Dwarf_Die *die_ptr = NULL;
+			while ((die_ptr = dwfl_module_nextcu(arg.dwfl_module, die_ptr, &arg.bias)) &&
+				   !dwarf_haspc(die_ptr, prog_addr));
 
-				if (die_ptr == NULL)
-					return drgn_error_format(DRGN_ERROR_LOOKUP,
-								 "Could not look up die at address 0x%lx", prog_addr);
-				die = *die_ptr;
-			}
-			if (dwarf_child(&die, &die) == 0) {
-				void **userdatap;
-				dwfl_module_info(arg.dwfl_module, &userdatap, NULL, NULL, NULL, NULL, NULL, NULL);
-				struct drgn_module *module = *userdatap;
-				Dwarf_Die die_found;
-				if (drgn_traverse_die_for_pc(die, prog_addr, &die_found)) {
-					struct drgn_error* err = drgn_type_from_dwarf(prog->dbinfo, module, &die_found, ret);
-					if (die_ret)
-						*die_ret = die_found;
-					return err;
-				}
-			}
+			if (die_ptr == NULL)
+				return drgn_error_format(DRGN_ERROR_LOOKUP,
+							 "could not find DWARF DIE at address %#lx", prog_addr);
+			die = *die_ptr;
 		}
-		/* if (arg.err) */
-		/* 	return arg.err; */
-		// If this dosen't trigger, it seems like the type is here, but no definition is present (maybe?)
+		if (dwarf_child(&die, &die) != 0)
+			goto err;
+		Dwarf_Die die_found;
+		if (!drgn_traverse_die_for_pc(die, prog_addr, &die_found))
+			goto err;
+		dwfl_module = arg.dwfl_module;
+		die = die_found;
+	} else {
+		struct drgn_inlined_instance instance;
+		struct drgn_error *err = find_inlined_instance(prog, name, &instance);
+		if (err)
+			return err;
+		if (!dwarf_die_addr_die(prog->dwarf, (void*)instance.die_addr, &die))
+			return drgn_error_format(DRGN_ERROR_LOOKUP,
+						 "could not find DWARF DIE at address %#lx", instance.die_addr);
+		dwfl_module = dwfl_addrmodule(prog->dbinfo->dwfl, instance.entry_pc);
+		if (!dwfl_module)
+			return drgn_error_format(DRGN_ERROR_LOOKUP,
+						 "could not find Dwfl module corresponding to the DWARF DIE at address %#lx", instance.die_addr);
+
 	}
+
+	void **userdatap;
+	dwfl_module_info(dwfl_module, &userdatap, NULL, NULL, NULL, NULL, NULL, NULL);
+	struct drgn_module *module = *userdatap;
+	struct drgn_error* err = NULL;
+	if (ret)
+		err = drgn_type_from_dwarf(prog->dbinfo, module, &die, ret);
+	if (err)
+		return err;
+	if (die_ret)
+		*die_ret = die;
+	return NULL;
+
+	err:
 	return drgn_error_format(DRGN_ERROR_LOOKUP,
 				 "could not find symbol with name '%s'%s", name,
 				 arg.bad_symtabs ?
