@@ -124,9 +124,16 @@ struct drgn_dwarf_type {
 	bool is_incomplete_array;
 };
 
+static inline const char*
+drgn_inlined_group_to_key(const struct drgn_inlined_group *group)
+{
+	return group->linkage_name;
+}
+
 DEFINE_HASH_MAP_TYPE(drgn_dwarf_type_map, const void *, struct drgn_dwarf_type)
 DEFINE_HASH_SET_TYPE(uintptr_set, uintptr_t)
 DEFINE_HASH_MAP_TYPE(drgn_inlined_map, uintptr_t, struct uintptr_set)
+DEFINE_HASH_SET_TYPE(drgn_inlined_group_set, struct drgn_inlined_group)
 
 /** DWARF debugging information for a program/@ref drgn_debug_info. */
 struct drgn_dwarf_info {
@@ -150,6 +157,8 @@ struct drgn_dwarf_info {
 	 * where a function has been inlined.
 	 */
 	struct drgn_inlined_map inlined_map;
+	bool inlined_group_set_populated;
+	struct drgn_inlined_group_set inlined_group_set;
 
 	/**
 	 * Cache of parsed types.
@@ -178,6 +187,7 @@ drgn_inlined_group_dup_internal(const struct drgn_inlined_group *group,
 		       struct drgn_inlined_group *ret);
 
 void drgn_inlined_group_deinit(struct drgn_inlined_group *group);
+struct drgn_error *drgn_program_populate_inlined_group_set(struct drgn_program* prog);
 
 DEFINE_VECTOR_TYPE(drgn_dwarf_index_pending_cu_vector,
 		   struct drgn_dwarf_index_pending_cu)
