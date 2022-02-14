@@ -5,6 +5,7 @@
 #include <elf.h>
 #include <inttypes.h>
 #include <string.h>
+#include <sys/user.h>
 
 #include "array.h"
 #include "drgn.h"
@@ -340,6 +341,14 @@ pt_regs_get_initial_registers_x86_64(const struct drgn_object *obj,
 							ret);
 }
 
+static struct drgn_error *user_regs_struct_get_initial_registers_x86_64(
+	struct drgn_program *prog, const struct user_regs_struct *regs,
+	struct drgn_register_state **ret)
+{
+	return get_initial_registers_from_struct_x86_64(prog, regs,
+							sizeof(*regs), ret);
+}
+
 static struct drgn_error *
 prstatus_get_initial_registers_x86_64(struct drgn_program *prog,
 				      const void *prstatus, size_t size,
@@ -670,6 +679,7 @@ linux_kernel_pgtable_iterator_next_x86_64(struct pgtable_iterator *it,
 					  uint64_t *virt_addr_ret,
 					  uint64_t *phys_addr_ret)
 {
+	#undef PAGE_SHIFT
 	static const int PAGE_SHIFT = 12;
 	static const int PGTABLE_SHIFT = 9;
 	static const int PGTABLE_MASK = (1 << PGTABLE_SHIFT) - 1;
@@ -756,6 +766,7 @@ const struct drgn_architecture_info arch_info_x86_64 = {
 	.fallback_unwind = fallback_unwind_x86_64,
 	.pt_regs_get_initial_registers = pt_regs_get_initial_registers_x86_64,
 	.prstatus_get_initial_registers = prstatus_get_initial_registers_x86_64,
+	.user_regs_struct_get_initial_registers = user_regs_struct_get_initial_registers_x86_64,
 	.linux_kernel_get_initial_registers =
 		linux_kernel_get_initial_registers_x86_64,
 	.apply_elf_rela = apply_elf_rela_x86_64,

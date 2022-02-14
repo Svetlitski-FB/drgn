@@ -7,6 +7,7 @@
 #include <elf.h>
 #include <elfutils/known-dwarf.h>
 #include <elfutils/libdw.h>
+#include <elfutils/libdwfl.h>
 #include <gelf.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -34,6 +35,7 @@ static inline int omp_get_max_threads(void)
 
 #include "array.h"
 #include "debug_info.h" // IWYU pragma: associated
+#include "drgn.h"
 #include "error.h"
 #include "language.h"
 #include "lazy_object.h"
@@ -4019,12 +4021,15 @@ drgn_dwarf_location(struct drgn_debug_info_module *module,
  */
 static const int MAX_DWARF_EXPR_OPS = 10000;
 
+
+
 /* A DWARF expression and the context it is being evaluated in. */
 struct drgn_dwarf_expression_context {
 	struct binary_buffer bb;
 	const char *start;
 	struct drgn_program *prog;
 	struct drgn_debug_info_module *module;
+	const struct drgn_object_locator *locator;
 	uint8_t address_size;
 	Dwarf_Die cu_die;
 	const char *cu_addr_base;
@@ -4045,6 +4050,7 @@ static inline struct drgn_error *
 drgn_dwarf_expression_context_init(struct drgn_dwarf_expression_context *ctx,
 				   struct drgn_program *prog,
 				   struct drgn_debug_info_module *module,
+				   const struct drgn_object_locator *locator,
 				   Dwarf_CU *cu, Dwarf_Die *function,
 				   const struct drgn_register_state *regs,
 				   const char *expr, size_t expr_size)
@@ -4055,6 +4061,7 @@ drgn_dwarf_expression_context_init(struct drgn_dwarf_expression_context *ctx,
 			   drgn_dwarf_expression_buffer_error);
 	ctx->start = expr;
 	ctx->prog = prog;
+	ctx->locator = locator;
 	ctx->module = module;
 	if (cu) {
 		if (!dwarf_cu_die(cu, &ctx->cu_die, NULL, NULL,
@@ -4075,6 +4082,7 @@ drgn_dwarf_expression_context_init(struct drgn_dwarf_expression_context *ctx,
 
 static struct drgn_error *
 drgn_dwarf_frame_base(struct drgn_program *prog,
+			  const struct drgn_object_locator *locator,
 		      struct drgn_debug_info_module *module, Dwarf_Die *die,
 		      const struct drgn_register_state *regs,
 		      int *remaining_ops, uint64_t *ret);
@@ -4216,7 +4224,7 @@ drgn_eval_dwarf_expression(struct drgn_dwarf_expression_context *ctx,
 			break;
 		/* Register values. */
 		case DW_OP_fbreg: {
-			err = drgn_dwarf_frame_base(ctx->prog, ctx->module,
+			err = drgn_dwarf_frame_base(ctx->prog, ctx->locator, ctx->module,
 						    ctx->function, ctx->regs,
 						    remaining_ops, &uvalue);
 			if (err)
@@ -4530,8 +4538,19 @@ branch:
 	return NULL;
 }
 
+static inline const struct drgn_location_description *
+find_location(const struct drgn_location_description *locations,
+	      size_t locations_size, Dwarf_Addr pc)
+{
+	for (size_t i = 0; i < locations_size; i++)
+		if (pc >= locations[i].start && pc < locations[i].end)
+			return &locations[i];
+	return NULL;
+}
+
 static struct drgn_error *
 drgn_dwarf_frame_base(struct drgn_program *prog,
+			  const struct drgn_object_locator *locator,
 		      struct drgn_debug_info_module *module, Dwarf_Die *die,
 		      const struct drgn_register_state *regs,
 		      int *remaining_ops, uint64_t *ret)
@@ -4541,21 +4560,18 @@ drgn_dwarf_frame_base(struct drgn_program *prog,
 	drgn_register_number (*dwarf_regno_to_internal)(uint64_t) =
 		module->platform.arch->dwarf_regno_to_internal;
 
-	if (!die)
-		return &drgn_not_found;
-	Dwarf_Attribute attr_mem, *attr;
-	if (!(attr = dwarf_attr_integrate(die, DW_AT_frame_base, &attr_mem)))
-		return &drgn_not_found;
-	const char *expr;
-	size_t expr_size;
-	err = drgn_dwarf_location(module, attr, regs, &expr, &expr_size);
-	if (err)
-		return err;
+	struct optional_uint64 pc = drgn_register_state_get_pc(regs);
+	if (!pc.has_value)
+		return drgn_error_create(DRGN_ERROR_OTHER, "No PC value was given");
+	const struct drgn_location_description *location = find_location(
+		locator->frame_base_locations, locator->frame_base_locations_size, pc.value);
+	if (!location)
+		return drgn_error_format(DRGN_ERROR_LOOKUP, "No matching location description was found for PC value %lx", pc.value);
 
 	struct drgn_dwarf_expression_context ctx;
-	if ((err = drgn_dwarf_expression_context_init(&ctx, prog, module,
-						      die->cu, NULL, regs, expr,
-						      expr_size)))
+	if ((err = drgn_dwarf_expression_context_init(&ctx, prog, module, locator,
+						      NULL, NULL, regs, location->expr,
+						      location->expr_size)))
 		return err;
 	struct uint64_vector stack = VECTOR_INIT;
 	for (;;) {
@@ -4947,6 +4963,7 @@ static struct drgn_error *read_bits(struct drgn_program *prog, void *dst,
 static struct drgn_error *
 drgn_object_from_dwarf_location(struct drgn_program *prog,
 				struct drgn_debug_info_module *module,
+				const struct drgn_object_locator *locator,
 				Dwarf_Die *die,
 				struct drgn_qualified_type qualified_type,
 				const char *expr, size_t expr_size,
@@ -4975,8 +4992,9 @@ drgn_object_from_dwarf_location(struct drgn_program *prog,
 
 	int remaining_ops = MAX_DWARF_EXPR_OPS;
 	struct drgn_dwarf_expression_context ctx;
-	if ((err = drgn_dwarf_expression_context_init(&ctx, prog, module,
-						      die->cu, function_die,
+	Dwarf_CU *cu = die ? die->cu : NULL;
+	if ((err = drgn_dwarf_expression_context_init(&ctx, prog, module, locator,
+						      cu, function_die,
 						      regs, expr, expr_size)))
 		return err;
 	struct uint64_vector stack = VECTOR_INIT;
@@ -5215,24 +5233,21 @@ reg:
 
 	if (bit_pos < type.bit_size || (bit_offset < 0 && !value_buf)) {
 absent:
-		if (dwarf_tag(die) == DW_TAG_template_value_parameter) {
+		if (die && dwarf_tag(die) == DW_TAG_template_value_parameter) {
 			return drgn_error_create(DRGN_ERROR_OTHER,
 						 "DW_AT_template_value_parameter is missing value");
 		}
 		drgn_object_reinit(ret, &type, DRGN_OBJECT_ABSENT);
 		err = NULL;
 	} else if (bit_offset >= 0) {
-		Dwarf_Addr start, end, bias;
-		dwfl_module_info(module->dwfl_module, NULL, &start, &end, &bias,
-				 NULL, NULL, NULL);
 		/*
 		 * If the address is not in the module's address range, then
 		 * it's probably something special like a Linux per-CPU variable
 		 * (which isn't actually a variable address but an offset).
 		 * Don't apply the bias in that case.
 		 */
-		if (start <= address + bias && address + bias < end)
-			address += bias;
+		if (locator->module_start <= address + locator->module_bias && address + locator->module_bias < locator->module_end)
+			address += locator->module_bias;
 		err = drgn_object_set_reference_internal(ret, &type, address,
 							 bit_offset);
 	} else if (type.encoding == DRGN_OBJECT_ENCODING_BUFFER) {
@@ -5320,23 +5335,41 @@ drgn_object_from_dwarf(struct drgn_debug_info *dbinfo,
 	if (err)
 		return err;
 	Dwarf_Attribute attr_mem, *attr;
-	const char *expr;
-	size_t expr_size;
-	if ((attr = dwarf_attr_integrate(die, DW_AT_location, &attr_mem))) {
-		err = drgn_dwarf_location(module, attr, regs, &expr,
-					  &expr_size);
-		if (err)
-			return err;
-	} else if ((attr = dwarf_attr_integrate(die, DW_AT_const_value,
+	if ((attr = dwarf_attr_integrate(die, DW_AT_const_value,
 						&attr_mem))) {
 		return drgn_object_from_dwarf_constant(dbinfo, die,
 						       qualified_type, attr,
 						       ret);
+	}
+	const char *expr;
+	size_t expr_size;
+	struct drgn_object_locator locator;
+	err = drgn_object_locator_init(drgn_object_program(ret), module, function_die, die, &locator);
+	if (err)
+		return err;
+	if (regs) {
+		struct optional_uint64 pc = drgn_register_state_get_pc(regs);
+		if (!pc.has_value)
+			return drgn_error_create(DRGN_ERROR_OTHER,
+						 "No PC value was provided");
+		const struct drgn_location_description *location =
+			find_location(locator.locations, locator.locations_size, pc.value);
+		if (!location) {
+			expr = NULL;
+			expr_size = 0;
+		} else {
+			expr = location->expr;
+			expr_size = location->expr_size;
+		}
+	} else if ((attr = dwarf_attr_integrate(die, DW_AT_location, &attr_mem))) {
+		err = drgn_dwarf_location(module, attr, regs, &expr, &expr_size);
+		if (err)
+			return err;
 	} else {
 		expr = NULL;
 		expr_size = 0;
 	}
-	return drgn_object_from_dwarf_location(dbinfo->prog, module, die,
+	return drgn_object_from_dwarf_location(dbinfo->prog, module, &locator, die,
 					       qualified_type, expr, expr_size,
 					       function_die, regs, ret);
 }
@@ -7998,6 +8031,7 @@ drgn_debug_info_find_dwarf_cfi(struct drgn_debug_info_module *module,
 
 struct drgn_error *
 drgn_eval_cfi_dwarf_expression(struct drgn_program *prog,
+				   struct drgn_object_locator *locator,
 			       const struct drgn_cfi_rule *rule,
 			       const struct drgn_register_state *regs,
 			       void *buf, size_t size)
@@ -8019,7 +8053,7 @@ drgn_eval_cfi_dwarf_expression(struct drgn_program *prog,
 
 	int remaining_ops = MAX_DWARF_EXPR_OPS;
 	struct drgn_dwarf_expression_context ctx;
-	drgn_dwarf_expression_context_init(&ctx, prog, regs->module, NULL, NULL,
+	drgn_dwarf_expression_context_init(&ctx, prog, regs->module, locator, NULL, NULL,
 					   regs, rule->expr, rule->expr_size);
 	err = drgn_eval_dwarf_expression(&ctx, &stack, &remaining_ops);
 	if (err)
@@ -8051,4 +8085,186 @@ drgn_eval_cfi_dwarf_expression(struct drgn_program *prog,
 out:
 	uint64_vector_deinit(&stack);
 	return err;
+}
+
+DEFINE_VECTOR(location_description_vector, struct drgn_location_description)
+
+static struct drgn_error *drgn_location_descriptions_from_attribute(
+	struct drgn_program *prog, struct drgn_debug_info_module *module,
+	Dwarf_Die *die, unsigned int attribute_name, bool is_required,
+	struct drgn_location_description **locations_ret,
+	size_t *locations_size_ret)
+{
+	Dwarf_Attribute attr;
+	if (!dwarf_attr_integrate(die, attribute_name, &attr)) {
+		if (is_required)
+			return drgn_error_format(
+				DRGN_ERROR_LOOKUP,
+				"could not find DWARF attribute with value %#x for DWARF DIE with address %p",
+				attribute_name, die->addr);
+		*locations_ret = NULL;
+		*locations_size_ret = 0;
+		return NULL;
+	}
+	struct drgn_error *err;
+	static struct drgn_register_state *regs = NULL;
+	if (!regs) {
+		err = module->platform.arch
+			      ->user_regs_struct_get_initial_registers(
+				      prog, &(struct user_regs_struct){},
+				      &regs);
+		if (err)
+			return err;
+	}
+	ptrdiff_t offset = 0;
+	Dwarf_Addr base;
+	struct location_description_vector locations = VECTOR_INIT;
+	struct drgn_location_description *location;
+	do {
+		location = location_description_vector_append_entry(&locations);
+		if (!location) {
+			err = &drgn_enomem;
+			break;
+		}
+		offset = dwarf_getlocations(&attr, offset, &base,
+					    &location->start, &location->end,
+					    &(Dwarf_Op *){0}, &(size_t){0});
+		if (offset == -1) {
+			err = drgn_error_libdw();
+			break;
+		}
+		// It's very important that we call this function instead of
+		// setting the pc value directly, since calling it modifies
+		// other important internal state which marks the register as
+		// being present.
+		drgn_register_state_set_pc(prog, regs, location->start);
+		err = drgn_dwarf_location(module, &attr, regs, &location->expr,
+					  &location->expr_size);
+		if (err)
+			break;
+		location->expr = memdup((void *)location->expr, location->expr_size);
+		if (!location->expr)
+			err = &drgn_enomem;
+	} while (!err && offset != 0 &&
+		 !(location->start == 0 && location->end == -1));
+		/*^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+		  This part of the condition comes straight from the documentation
+		  comment above `dwarf_getlocations`, see it for further details. */
+	if (err) {
+		location_description_vector_deinit(&locations);
+		return err;
+	}
+	location_description_vector_shrink_to_fit(&locations);
+	// When successful we intentionally do not deinit `locations`,
+	// since we move its data into `locations_ret`.
+	*locations_ret = locations.data;
+	*locations_size_ret = locations.size;
+	return NULL;
+}
+
+LIBDRGN_PUBLIC
+struct drgn_error *
+drgn_object_locator_init(struct drgn_program *prog,
+			 struct drgn_debug_info_module *module,
+			 Dwarf_Die *function_die, Dwarf_Die *die,
+			 struct drgn_object_locator *ret)
+{
+	// Only `function_die` is optional
+	assert(prog && module && die && ret);
+	dwfl_module_info(module->dwfl_module, NULL, &ret->module_start,
+			 &ret->module_end, &ret->module_bias, NULL, NULL, NULL);
+	struct drgn_error *err;
+	err = drgn_type_from_dwarf_attr(prog->dbinfo, module, die,
+					drgn_program_language(prog), false,
+					false, NULL, &ret->qualified_type);
+	if (err)
+		return err;
+	err = drgn_location_descriptions_from_attribute(prog, module, die,
+							DW_AT_location, true,
+							&ret->locations,
+							&ret->locations_size);
+	if (err)
+		return err;
+	if (function_die) {
+		int tag = dwarf_tag(function_die);
+		if (!(tag == DW_TAG_subprogram ||
+		      tag == DW_TAG_inlined_subroutine ||
+		      tag == DW_TAG_entry_point)) {
+			free(ret->locations);
+			return drgn_error_format(
+				DRGN_ERROR_INVALID_ARGUMENT,
+				"expected `function_die` to have tag `DW_TAG_subprogram`, `DW_TAG_inlined_subroutine`, or `DW_TAG_entry_point`, but its tag was %#x",
+				tag);
+		}
+		// We pass `false` for `is_required` here because if `function_die` is a
+		// `DW_TAG_inlined_subroutine` or perhaps the compiler determined that the
+		// attribute was unneeded by any other location descriptions, the
+		// `DW_AT_frame_base` attribute may not be present.
+		err = drgn_location_descriptions_from_attribute(
+			prog, module, function_die, DW_AT_frame_base, false,
+			&ret->frame_base_locations,
+			&ret->frame_base_locations_size);
+		if (err) {
+			free(ret->locations);
+			return err;
+		}
+	} else {
+		ret->frame_base_locations = NULL;
+		ret->frame_base_locations_size = 0;
+	}
+	return NULL;
+}
+
+LIBDRGN_PUBLIC void
+drgn_object_locator_deinit(struct drgn_object_locator *locator)
+{
+	for (size_t i = 0; i < locator->locations_size; i++)
+		free((void *)locator->locations[i].expr);
+	free(locator->locations);
+	for (size_t i = 0; i < locator->frame_base_locations_size; i++)
+		free((void *)locator->frame_base_locations[i].expr);
+	free(locator->frame_base_locations);
+}
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_object_locate(const struct drgn_object_locator *locator,
+		   const struct user_regs_struct *regs, struct drgn_object *ret)
+{
+	static const struct drgn_platform x86_64_platform = {
+		.flags = DRGN_PLATFORM_IS_64_BIT |
+			 DRGN_PLATFORM_IS_LITTLE_ENDIAN,
+		.arch = &arch_info_x86_64};
+	static bool fake_prog_initialized = false;
+	static struct drgn_program fake_prog;
+	if (!fake_prog_initialized) {
+		drgn_program_init(&fake_prog, &x86_64_platform);
+		fake_prog.lang = drgn_languages[DRGN_LANGUAGE_CPP];
+		fake_prog_initialized = true;
+	}
+	struct drgn_register_state *drgn_regs;
+	struct drgn_error *err =
+		arch_info_x86_64.user_regs_struct_get_initial_registers(
+			&fake_prog, regs, &drgn_regs);
+	if (err)
+		return err;
+	struct optional_uint64 pc = drgn_register_state_get_pc(drgn_regs);
+	if (!pc.has_value)
+		return drgn_error_create(
+			DRGN_ERROR_OTHER,
+			"No PC value was provided when trying to locate object");
+	const struct drgn_location_description *location = find_location(
+		locator->locations, locator->locations_size, pc.value);
+	if (!location)
+		return drgn_error_format(
+			DRGN_ERROR_OTHER,
+			"No location description matched for PC value %#lx",
+			pc.value);
+	assert(location->expr);
+	assert(location->expr_size);
+	drgn_object_init(ret, &fake_prog);
+	return drgn_object_from_dwarf_location(
+		&fake_prog,
+		&(struct drgn_debug_info_module){.platform = x86_64_platform},
+		locator, NULL, locator->qualified_type, location->expr,
+		location->expr_size, NULL, drgn_regs, ret);
 }

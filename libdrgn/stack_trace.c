@@ -928,8 +928,9 @@ drgn_unwind_one_register(struct drgn_program *prog,
 	}
 	case DRGN_CFI_RULE_AT_DWARF_EXPRESSION:
 	case DRGN_CFI_RULE_DWARF_EXPRESSION:
-		err = drgn_eval_cfi_dwarf_expression(prog, rule, regs, buf,
-						     size);
+		err = drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT, "stack traces disabled for OI");
+		/* err = drgn_eval_cfi_dwarf_expression(prog, rule, regs, buf, */
+		/* 				     size); */
 		break;
 	)
 	/*

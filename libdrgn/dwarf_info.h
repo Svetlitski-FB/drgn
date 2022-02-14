@@ -279,6 +279,7 @@ drgn_debug_info_find_dwarf_cfi(struct drgn_debug_info_module *module,
 
 struct drgn_error *
 drgn_eval_cfi_dwarf_expression(struct drgn_program *prog,
+			       struct drgn_object_locator *info,
 			       const struct drgn_cfi_rule *rule,
 			       const struct drgn_register_state *regs,
 			       void *buf, size_t size);
