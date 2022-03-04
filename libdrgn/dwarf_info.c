@@ -8712,3 +8712,148 @@ drgn_object_locate(const struct drgn_object_locator *locator,
 		locator, NULL, locator->qualified_type, location->expr,
 		location->expr_size, NULL, drgn_regs, ret);
 }
+
+#define DW_OP_UNKNOWN_FORMAT "unknown DWARF operation 0x%02x"
+#define DW_OP_BUF_LEN 126
+
+static const char *dw_op_str(int op, char buf[DW_OP_BUF_LEN])
+{
+	switch (op) {
+#define DWARF_ONE_KNOWN_DW_OP(name, value) case value: return "DW_OP_" #name;
+	DWARF_ALL_KNOWN_DW_OP
+#undef DWARF_ONE_KNOWN_DW_OP
+	default:
+		sprintf(buf, DW_OP_UNKNOWN_FORMAT, op);
+		return buf;
+	}
+}
+
+static uint8_t dw_op_num_operands(uint8_t op)
+{
+	switch (op) {
+	case DW_OP_abs:
+	case DW_OP_and:
+	case DW_OP_call_frame_cfa:
+	case DW_OP_deref:
+	case DW_OP_div:
+	case DW_OP_drop:
+	case DW_OP_dup:
+	case DW_OP_eq:
+	case DW_OP_form_tls_address:
+	case DW_OP_ge:
+	case DW_OP_gt:
+	case DW_OP_le:
+	case DW_OP_lit0 ... DW_OP_lit31:
+	case DW_OP_lt:
+	case DW_OP_minus:
+	case DW_OP_mod:
+	case DW_OP_mul:
+	case DW_OP_ne:
+	case DW_OP_neg:
+	case DW_OP_nop:
+	case DW_OP_not:
+	case DW_OP_or:
+	case DW_OP_over:
+	case DW_OP_plus:
+	case DW_OP_push_object_address:
+	case DW_OP_reg0 ... DW_OP_reg31:
+	case DW_OP_rot:
+	case DW_OP_shl:
+	case DW_OP_shr:
+	case DW_OP_shra:
+	case DW_OP_stack_value:
+	case DW_OP_swap:
+	case DW_OP_xderef:
+	case DW_OP_xor:
+		return 0;
+		break;
+	case DW_OP_addr:
+	case DW_OP_bra:
+	case DW_OP_breg0 ... DW_OP_breg31:
+	case DW_OP_call2:
+	case DW_OP_call4:
+	case DW_OP_call_ref:
+	case DW_OP_const1s:
+	case DW_OP_const1u:
+	case DW_OP_const2s:
+	case DW_OP_const2u:
+	case DW_OP_const4s:
+	case DW_OP_const4u:
+	case DW_OP_const8s:
+	case DW_OP_const8u:
+	case DW_OP_consts:
+	case DW_OP_constu:
+	case DW_OP_deref_size:
+	case DW_OP_fbreg:
+	case DW_OP_pick:
+	case DW_OP_piece:
+	case DW_OP_plus_uconst:
+	case DW_OP_regx:
+	case DW_OP_skip:
+	case DW_OP_xderef_size:
+	case DW_OP_addrx:
+	case DW_OP_constx:
+	case DW_OP_convert:
+	case DW_OP_reinterpret:
+		return 1;
+		break;
+	case DW_OP_bit_piece:
+	case DW_OP_bregx:
+	case DW_OP_implicit_value:
+	case DW_OP_deref_type:
+	case DW_OP_entry_value:
+	case DW_OP_implicit_pointer:
+	case DW_OP_regval_type:
+	case DW_OP_xderef_type:
+	case DW_OP_const_type: // This one actually has 3 operands but libdw doesn't represent that
+		return 2;
+		break;
+	default:
+		return 0;
+		break;
+	}
+}
+
+struct decoded_expr {
+	Dwarf_Op *expr;
+	size_t len;
+};
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_object_locator_to_string(const struct drgn_object_locator *locator, char **ret)
+{
+	struct decoded_expr *decoded_exprs[locator->locations_size];
+	struct string_builder string = {};
+	for (size_t i = 0; i < locator->locations_size; i++) {
+		int result = dwarf_getlocation(
+			&(Dwarf_Attribute){
+				.form = DW_FORM_exprloc,
+				.valp = (unsigned char *)locator->locations[i].expr},
+			&decoded_exprs[i]->expr, &decoded_exprs[i]->len);
+		if (result != 0)
+			return drgn_error_libdw();
+	}
+	size_t total_len = 0;
+	uint8_t binary_digits_needed = 1;
+	for (size_t i = 0; i < locator->locations_size; i++) {
+		total_len += decoded_exprs[i]->len;
+		binary_digits_needed = max(binary_digits_needed, (sizeof(uint64_t) * 8) - __builtin_clzl(locator->locations[i].end));
+	}
+	if (!string_builder_reserve(&string, total_len * 20))
+		return &drgn_enomem;
+	uint8_t hex_digits = (binary_digits_needed + (binary_digits_needed % 8)) / 4;
+	static const char* const op_formats[] = {"%s", "%s(0x%lx)", "%s(0x%lx, 0x%lx)"};
+	for (size_t i = 0; i < locator->locations_size; i++) {
+		struct drgn_location_description *location = &locator->locations[i];
+		string_builder_appendf(&string, "[0x%.*lx, 0x%.*lx): ", hex_digits, location->start, hex_digits, location->end);
+		for (size_t j = 0; j < decoded_exprs[i]->len; j++) {
+			Dwarf_Op *expr = &decoded_exprs[i]->expr[j];
+			uint8_t num_operands = dw_op_num_operands(expr->atom);
+			static char op_buf[DW_OP_BUF_LEN];
+			string_builder_appendf(&string, op_formats[num_operands], dw_op_str(expr->atom, op_buf), expr->number, expr->number2);
+		}
+		string_builder_line_break(&string);
+	}
+	string_builder_finalize(&string, ret);
+	return NULL;
+}

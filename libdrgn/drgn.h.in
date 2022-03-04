@@ -2937,6 +2937,10 @@ struct drgn_error *drgn_object_locate(const struct drgn_object_locator *locator,
 				      const struct user_regs_struct *regs,
 				      struct drgn_object *ret);
 
+struct drgn_error *
+drgn_object_locator_to_string(const struct drgn_object_locator *locator,
+			      char **ret);
+
 /** @} */
 
 /**
