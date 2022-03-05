@@ -8822,21 +8822,28 @@ struct decoded_expr {
 LIBDRGN_PUBLIC struct drgn_error *
 drgn_object_locator_to_string(const struct drgn_object_locator *locator, char **ret)
 {
-	struct decoded_expr *decoded_exprs[locator->locations_size];
+	uint8_t fake_cu[256] = {};
+	struct decoded_expr decoded_exprs[locator->locations_size];
 	struct string_builder string = {};
+	struct uint8_vector vec = VECTOR_INIT;
 	for (size_t i = 0; i < locator->locations_size; i++) {
+		uint8_vector_reserve(&vec, 16 + locator->locations[i].expr_size);
+		append_uleb128(&vec, locator->locations[i].expr_size);
+		memcpy(&vec.data[vec.size], locator->locations[i].expr, locator->locations[i].expr_size);
 		int result = dwarf_getlocation(
 			&(Dwarf_Attribute){
 				.form = DW_FORM_exprloc,
-				.valp = (unsigned char *)locator->locations[i].expr},
-			&decoded_exprs[i]->expr, &decoded_exprs[i]->len);
+				.valp = (unsigned char *)locator->locations[i].expr,
+				.cu = (Dwarf_CU*)fake_cu},
+			&decoded_exprs[i].expr, &decoded_exprs[i].len);
+			printf("%d\n", decoded_exprs[i].len);
 		if (result != 0)
 			return drgn_error_libdw();
 	}
 	size_t total_len = 0;
 	uint8_t binary_digits_needed = 1;
 	for (size_t i = 0; i < locator->locations_size; i++) {
-		total_len += decoded_exprs[i]->len;
+		total_len += decoded_exprs[i].len;
 		binary_digits_needed = max(binary_digits_needed, (sizeof(uint64_t) * 8) - __builtin_clzl(locator->locations[i].end));
 	}
 	if (!string_builder_reserve(&string, total_len * 20))
@@ -8846,11 +8853,23 @@ drgn_object_locator_to_string(const struct drgn_object_locator *locator, char **
 	for (size_t i = 0; i < locator->locations_size; i++) {
 		struct drgn_location_description *location = &locator->locations[i];
 		string_builder_appendf(&string, "[0x%.*lx, 0x%.*lx): ", hex_digits, location->start, hex_digits, location->end);
-		for (size_t j = 0; j < decoded_exprs[i]->len; j++) {
-			Dwarf_Op *expr = &decoded_exprs[i]->expr[j];
+		for (size_t j = 0; j < decoded_exprs[i].len; j++) {
+			Dwarf_Op *expr = &decoded_exprs[i].expr[j];
 			uint8_t num_operands = dw_op_num_operands(expr->atom);
 			static char op_buf[DW_OP_BUF_LEN];
+			printf("%s: %d\n", dw_op_str(expr->atom, op_buf), num_operands);
+			switch(num_operands) {
+			case 0:
+			string_builder_appendf(&string, op_formats[num_operands], dw_op_str(expr->atom, op_buf));
+			break;
+			case 1:
+			string_builder_appendf(&string, op_formats[num_operands], dw_op_str(expr->atom, op_buf), expr->number);
+			break;
+			case 2:
 			string_builder_appendf(&string, op_formats[num_operands], dw_op_str(expr->atom, op_buf), expr->number, expr->number2);
+			break;
+
+			}
 		}
 		string_builder_line_break(&string);
 	}

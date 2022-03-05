@@ -6,9 +6,46 @@
 #include "../program.h"
 #include "../vector.h"
 #include "../util.h"
+#include "dwarf.h"
 
 DEFINE_HASH_SET_FUNCTIONS(pyobjectp_set, ptr_key_hash_pair, scalar_key_eq)
 
+static PyObject *Program_debug(Program *self)
+{
+	struct drgn_debug_info_module *module;
+	struct drgn_error *err;
+	struct drgn_qualified_type type;
+	Dwarf_Die function;
+	err = drgn_program_find_type_by_symbol_name(
+		&self->prog,
+		"_Z7doStuffR3FooRSt6vectorISt3mapINSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES8_St4lessIS8_ESaISt4pairIKS8_S8_EEESaISF_EERS1_IS8_SaIS8_EERS1_ISB_IS8_dESaISM_EE",
+		&type, &function, &module);
+	if (err)
+		return set_drgn_error(err);
+	size_t num_params = drgn_type_num_parameters(type.type);
+	Dwarf_Die children[num_params];
+	dwarf_child(&function, &children[0]);
+	for (size_t i = 0; i < num_params;) {
+		if (dwarf_tag(&children[i]) == DW_TAG_formal_parameter) {
+			i++;
+			if (i < num_params) {
+				dwarf_siblingof(&children[i - 1], &children[i]);
+			}
+		} else {
+			dwarf_siblingof(&children[i], &children[i]);
+		}
+	}
+	struct drgn_object_locator children_info[num_params];
+	for (size_t i = 0; i < num_params; i++) {
+		err = drgn_object_locator_init(&self->prog, module, &function, &children[i], &children_info[i]);
+		if (err)
+			return set_drgn_error(err);
+		char *ret;
+		drgn_object_locator_to_string(&children_info[i],&ret);
+		puts(ret);
+	}
+	Py_RETURN_NONE;
+}
 int Program_hold_object(Program *prog, PyObject *obj)
 {
 	int ret = pyobjectp_set_insert(&prog->objects, &obj, NULL);
@@ -1016,6 +1053,7 @@ static int Program_set_language(Program *self, PyObject *value, void *arg)
 }
 
 static PyMethodDef Program_methods[] = {
+	{"debug", (PyCFunction)Program_debug, METH_NOARGS, ""},
 	{"add_memory_segment", (PyCFunction)Program_add_memory_segment,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_add_memory_segment_DOC},
 	{"add_type_finder", (PyCFunction)Program_add_type_finder,
