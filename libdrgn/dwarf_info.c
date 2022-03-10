@@ -7358,6 +7358,8 @@ drgn_type_from_dwarf_internal(struct drgn_debug_info *dbinfo,
 	dbinfo->dwarf.depth--;
 	if (err)
 		return err;
+	ret->type->_private.die_addr = (uintptr_t) die->addr;
+	ret->type->_private.module = module;
 
 	entry.value.type = ret->type;
 	entry.value.qualifiers = ret->qualifiers;
@@ -8626,5 +8628,116 @@ drgn_eval_cfi_dwarf_expression(struct drgn_program *prog,
 
 out:
 	uint64_vector_deinit(&stack);
+	return err;
+}
+
+static struct drgn_error *drgn_dwarf_peel(Dwarf_Die *die, Dwarf_Die *ret)
+{
+	*ret = *die;
+	// Set an aribtrary maximum depth to prevent entering an infinite
+	// loop due to malformed debug information.
+	for (int depth = 0; depth < 64; depth++) {
+		switch (dwarf_tag(ret)) {
+		case DW_TAG_typedef:
+		case DW_TAG_const_type:
+		case DW_TAG_volatile_type:
+		case DW_TAG_restrict_type:
+		case DW_TAG_atomic_type:
+		case DW_TAG_immutable_type:
+		case DW_TAG_packed_type:
+		case DW_TAG_shared_type: {
+			int result = dwarf_peel_type(ret, ret);
+			if (result == -1)
+				return drgn_error_libdw();
+			if (result == 1)
+				return NULL; // Nothing left to peel
+			// if result == 0, we proceed with peeling
+		}
+		break;
+		case DW_TAG_pointer_type:
+		case DW_TAG_reference_type:
+		case DW_TAG_rvalue_reference_type: {
+			Dwarf_Attribute attr;
+			if (!dwarf_attr_integrate(ret, DW_AT_type, &attr))
+				return drgn_error_format(
+					DRGN_ERROR_INVALID_ARGUMENT,
+					"DWARF DIE with address 0x%lx was missing DW_AT_type attribute",
+					(uintptr_t)ret->addr);
+			if (!dwarf_formref_die(&attr, ret))
+				return drgn_error_libdw();
+		}
+		break;
+		default:
+			// Nothing left to peel
+			return NULL;
+		}
+	}
+	return drgn_error_create(
+		DRGN_ERROR_OTHER,
+		"Maximum depth exceeded while peeling DWARF DIE type");
+}
+
+LIBDRGN_PUBLIC struct drgn_error *
+drgn_type_fully_qualified_name(struct drgn_type *type, char **ret)
+{
+	Dwarf_Die die;
+	struct drgn_error *err;
+	// TODO fix this super ultra hack - we shouldn't be hijacking this function in this way
+	struct drgn_dwarf_index_die hack_index = {
+		.addr = type->_private.die_addr,
+		.module = type->_private.module};
+	if ((err = drgn_dwarf_index_get_die(&hack_index, &die)))
+		return err;
+
+	Dwarf_Die *ancestors;
+	size_t num_ancestors;
+	if ((err = drgn_find_die_ancestors(&die, &ancestors, &num_ancestors)))
+		return err;
+
+	struct string_builder fully_qualified_name = {};
+	// We know we're going to at least have the leading "::", the type name,
+	// and the null terminator, so we reserve a modest amount of space in order
+	// to avoid the first few reallocations where the capacity is _very_ small.
+	if (!string_builder_reserve(&fully_qualified_name, 16)) {
+		err = &drgn_enomem;
+		goto err;
+	}
+	for (size_t i = 0; i <= num_ancestors; i++) {
+		Dwarf_Die *current = i == num_ancestors ? &die : &ancestors[i];
+		int tag = dwarf_tag(current);
+		if (!(tag == DW_TAG_namespace || tag == DW_TAG_class_type ||
+		      i == num_ancestors))
+			continue;
+		const char *name;
+		Dwarf_Attribute attr;
+		Dwarf_Die peeled_type;
+		if ((err = drgn_dwarf_peel(current, &peeled_type)))
+			goto err;
+		// Handle type units on class dies
+		if (dwarf_attr_integrate(&peeled_type, DW_AT_signature, &attr)) {
+			Dwarf_Die type_unit_die;
+			if (!dwarf_formref_die(&attr, &type_unit_die)) {
+				err = drgn_error_format(
+					DRGN_ERROR_OTHER,
+					"DWARF DIE at address %lx with tag 0x%x has invalid DW_AT_signature",
+					(uintptr_t)peeled_type.addr, tag);
+				goto err;
+			}
+			if ((err = drgn_dwarf_peel(&type_unit_die, &peeled_type)))
+				goto err;
+		}
+		name = dwarf_diename(&peeled_type);
+		if (!string_builder_appendf(&fully_qualified_name, "::%s",
+					    name)) {
+			err = &drgn_enomem;
+			goto err;
+		}
+	}
+	if (!(*ret = string_builder_null_terminate(&fully_qualified_name)))
+		err = &drgn_enomem;
+err:
+	if (err)
+		free(fully_qualified_name.str);
+	free(ancestors);
 	return err;
 }
