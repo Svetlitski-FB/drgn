@@ -1013,7 +1013,35 @@ static int Program_set_language(Program *self, PyObject *value, void *arg)
 	return 0;
 }
 
+
+static PyObject *Program_find_by_mangled_name(Program *self, PyObject *args, PyObject *kwds)
+{
+	static char *keywords[] = {"name", NULL};
+	char *name;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwds, "s:find_by_mangled_name",
+					 keywords, &name))
+	    return NULL;
+	struct drgn_qualified_type type;
+	Dwarf_Die die;
+	struct drgn_error *err;
+	err = drgn_program_find_type_by_symbol_name(&self->prog, name, &type, &die, NULL);
+	if (err)
+		return set_drgn_error(err);
+	fprintf(stderr,
+	        "DWARF DIE information:\n"
+	        "  offset: 0x%lx\n"
+	        "  tag: 0x%lx\n"
+	        "  addr: 0x%lx\n",
+	        dwarf_dieoffset(&die),
+	        dwarf_tag(&die),
+	        (uintptr_t) die.addr);
+	return DrgnType_wrap(type);
+}
+
 static PyMethodDef Program_methods[] = {
+	{"find_by_mangled_name", (PyCFunction)Program_find_by_mangled_name,
+	 METH_VARARGS | METH_KEYWORDS, ""},
 	{"add_memory_segment", (PyCFunction)Program_add_memory_segment,
 	 METH_VARARGS | METH_KEYWORDS, drgn_Program_add_memory_segment_DOC},
 	{"add_type_finder", (PyCFunction)Program_add_type_finder,
