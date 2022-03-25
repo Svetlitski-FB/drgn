@@ -3402,6 +3402,9 @@ drgn_dwarf_info_update_index(struct drgn_dwarf_index_state *state)
 
 static struct drgn_error *index_namespace(struct drgn_namespace_dwarf_index *ns)
 {
+	if (!ns)
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT,
+		                         "attempted to index NULL namespace");
 	if (ns->pending_dies.size == 0)
 		return NULL;
 
