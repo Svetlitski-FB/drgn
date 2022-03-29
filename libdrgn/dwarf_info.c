@@ -8680,8 +8680,10 @@ drgn_type_fully_qualified_name(struct drgn_type *type, char **ret)
 		err = &drgn_enomem;
 		goto err;
 	}
+	// Yes the `<=` in the loop condition is correct, num_ancestors is truly
+	// the number of *ancestors*, the DIE itself is at `ancestors[num_ancestors]`
 	for (size_t i = 0; i <= num_ancestors; i++) {
-		Dwarf_Die *current = i == num_ancestors ? &die : &ancestors[i];
+		Dwarf_Die *current = &ancestors[i];
 		int tag = dwarf_tag(current);
 		if (!(tag == DW_TAG_namespace || tag == DW_TAG_class_type ||
 		      i == num_ancestors))
