@@ -1025,13 +1025,13 @@ static PyObject *Program_find_by_mangled_name(Program *self, PyObject *args, PyO
 	struct drgn_qualified_type type;
 	Dwarf_Die die;
 	struct drgn_error *err;
-	err = drgn_program_find_type_by_symbol_name(&self->prog, name, &type, &die, NULL);
+	err = drgn_program_find_type_by_symbol_name(&self->prog, name, &type, &die);
 	if (err)
 		return set_drgn_error(err);
 	fprintf(stderr,
 	        "DWARF DIE information:\n"
 	        "  offset: 0x%lx\n"
-	        "  tag: 0x%lx\n"
+	        "  tag: 0x%x\n"
 	        "  addr: 0x%lx\n",
 	        dwarf_dieoffset(&die),
 	        dwarf_tag(&die),
