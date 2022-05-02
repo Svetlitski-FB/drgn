@@ -3105,7 +3105,7 @@ skip:
 			depth1_tag = tag;
 			depth1_addr = die_addr;
 		}
-		if (depth == (tag == DW_TAG_enumerator ? 2 : 1) && name &&
+		if (depth >= (tag == DW_TAG_enumerator ? 2 : 1) && name &&
 		    !specification) {
 			if (insn & INSN_DIE_FLAG_DECLARATION)
 				declaration = true;
