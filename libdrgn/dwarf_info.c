@@ -532,7 +532,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	 * Instructions > 0 and <= INSN_MAX_SKIP indicate a number of bytes to
 	 * be skipped over.
 	 */
-	INSN_MAX_SKIP = 186,
+	INSN_MAX_SKIP = 185,
 
 	/* These instructions indicate an attribute that can be skipped over. */
 	INSN_SKIP_BLOCK,
@@ -610,6 +610,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	INSN_ABSTRACT_ORIGIN_REF_UDATA,
 	INSN_ABSTRACT_ORIGIN_REF_ADDR4,
 	INSN_ABSTRACT_ORIGIN_REF_ADDR8,
+	INSN_SIGNATURE_REF_SIG8,
 
 	NUM_INSNS,
 
@@ -895,6 +896,18 @@ static struct drgn_error *dw_at_sibling_to_insn(struct binary_buffer *bb,
 					   "unknown attribute form %#" PRIx64 " for DW_AT_sibling",
 					   form);
 	}
+}
+
+static struct drgn_error *dw_at_signature_to_insn(struct drgn_dwarf_index_cu *cu, struct binary_buffer *bb,
+						uint64_t form,
+						uint8_t *insn_ret) {
+	if (form != DW_FORM_ref_sig8) {
+		return binary_buffer_error(bb,
+					   "unknown attribute form %#" PRIx64 " for DW_AT_signature",
+					   form);
+	}
+	*insn_ret = INSN_SIGNATURE_REF_SIG8;
+	return NULL;
 }
 
 static struct drgn_error *dw_at_abstract_origin_to_insn(struct drgn_dwarf_index_cu *cu, struct binary_buffer *bb,
@@ -1351,6 +1364,9 @@ read_abbrev_decl(struct drgn_elf_file_section_buffer *buffer,
 			case DW_AT_abstract_origin:
 				err = dw_at_abstract_origin_to_insn(cu, &buffer->bb, form,
 									&insn);
+				break;
+			case DW_AT_signature:
+				err = dw_at_signature_to_insn(cu, &buffer->bb, form, &insn);
 				break;
 			default:
 				err = dw_form_to_insn(cu, &buffer->bb, form, &insn);
@@ -2271,6 +2287,10 @@ indirect_insn:;
 				if ((err = binary_buffer_skip_string(&buffer->bb)))
 					return err;
 				break;
+			case INSN_SIGNATURE_REF_SIG8:
+				if ((err = binary_buffer_skip(&buffer->bb, 8)))
+					return err;
+				break;
 			// TODO: Abstract this pattern to share code with INSN_SIBLING_REF*
 			case INSN_ABSTRACT_ORIGIN_REF1:
 				if ((err = binary_buffer_next_u8_into_u64(&buffer->bb,
@@ -2734,6 +2754,9 @@ err:
 	return success;
 }
 
+static struct drgn_error *
+drgn_dwarf_index_get_die(struct drgn_dwarf_index_die *die, Dwarf_Die *die_ret);
+
 /* Second pass: index the actual DIEs. */
 static struct drgn_error *
 index_cu_second_pass(struct drgn_namespace_dwarf_index *ns,
@@ -2772,6 +2795,7 @@ index_cu_second_pass(struct drgn_namespace_dwarf_index *ns,
 		bool specification = false;
 		const char *sibling = NULL;
 		const char* abstract_origin = NULL;
+		uint64_t signature = 0;
 		uint8_t insn;
 		uint8_t extra_die_flags = 0;
 		while ((insn = *insnp++) != INSN_END) {
@@ -2812,6 +2836,11 @@ indirect_insn:;
 			case INSN_SKIP_STRING:
 			case INSN_COMP_DIR_STRING:
 				if ((err = binary_buffer_skip_string(&buffer->bb)))
+					return err;
+				break;
+			case INSN_SIGNATURE_REF_SIG8:
+				if ((err = binary_buffer_next_u64(&buffer->bb,
+								  &signature)))
 					return err;
 				break;
 			// TODO: Abstract this pattern to share code with INSN_SIBLING_REF*
@@ -3076,6 +3105,31 @@ skip:
 		insn = *insnp | extra_die_flags;
 
 		uint8_t tag = insn & INSN_DIE_FLAG_TAG_MASK;
+		// Handle the rare case where a nested type is defined in a separate
+		// Type Unit from the type which contains it.
+		if (signature && cu->unit_type == DW_UT_type && depth == (tag == DW_TAG_enumerator ? 2 : 1)) {
+			#pragma omp critical
+			{
+				Dwarf_Die die, type_die_mem, *type_die;
+				struct drgn_dwarf_index_die hack_index = {.addr = die_addr,
+									  .file = cu->file};
+				err = drgn_dwarf_index_get_die(&hack_index, &die);
+				if (!err) {
+					Dwarf_Attribute signature_attr = {.code = DW_AT_signature,
+									  .form = DW_FORM_ref_sig8,
+									  .valp = (unsigned char *)&signature,
+									  .cu = die.cu};
+					type_die = dwarf_formref_die(&signature_attr, &type_die_mem);
+					if (!type_die)
+						err = drgn_error_libdw();
+					else
+						name = dwarf_diename(type_die);
+				}
+			}
+			if (err)
+				return err;
+		}
+
 		if (depth == 1) {
 			depth1_tag = tag;
 			depth1_addr = die_addr;
