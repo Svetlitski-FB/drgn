@@ -592,7 +592,8 @@ drgn_compound_type_create(struct drgn_compound_type_builder *builder,
 	}
 
 	if (!builder->members.size &&
-	    !builder->template_builder.parameters.size) {
+	    !builder->template_builder.parameters.size &&
+	    !builder->parents_builder.parameters.size) {
 		struct drgn_type key = {
 			{
 				.kind = builder->kind,
@@ -621,6 +622,7 @@ drgn_compound_type_create(struct drgn_compound_type_builder *builder,
 
 	drgn_type_member_vector_shrink_to_fit(&builder->members);
 	drgn_type_template_parameter_vector_shrink_to_fit(&builder->template_builder.parameters);
+	drgn_type_template_parameter_vector_shrink_to_fit(&builder->parents_builder.parameters);
 
 	type->_private.kind = builder->kind;
 	type->_private.is_complete = is_complete;
