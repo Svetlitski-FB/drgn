@@ -124,7 +124,13 @@ drgn_inlined_group_to_key(const struct drgn_inlined_group *group)
 
 DEFINE_HASH_MAP_TYPE(drgn_dwarf_type_map, const void *, struct drgn_dwarf_type)
 DEFINE_HASH_SET_TYPE(uintptr_set, uintptr_t)
-DEFINE_HASH_MAP_TYPE(drgn_inlined_map, uintptr_t, struct uintptr_set)
+
+struct drgn_inlined_group_info {
+  struct uintptr_set inlined_instances;
+  struct drgn_debug_info_module *module;
+};
+
+DEFINE_HASH_MAP_TYPE(drgn_inlined_map, uintptr_t, struct drgn_inlined_group_info)
 DEFINE_HASH_SET_TYPE(drgn_inlined_group_set, struct drgn_inlined_group)
 
 /** DWARF debugging information for a program/@ref drgn_debug_info. */
@@ -321,6 +327,16 @@ struct drgn_error *
 drgn_type_from_dwarf(struct drgn_debug_info *dbinfo,
 		     struct drgn_debug_info_module *module, Dwarf_Die *die,
 		     struct drgn_qualified_type *ret);
+
+struct drgn_error *
+drgn_dwarf_index_find_die(uintptr_t die_addr,
+			  struct drgn_debug_info_module *module,
+			  Dwarf_Die *ret);
+
+struct drgn_error *
+drgn_abstract_origin_module(struct drgn_program *prog,
+			    uintptr_t abstract_origin,
+			    struct drgn_debug_info_module **ret);
 
 /** @} */
 

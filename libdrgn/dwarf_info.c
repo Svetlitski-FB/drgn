@@ -9297,3 +9297,30 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type,
 					       .module = type->_private.module},
 		ret);
 }
+
+struct drgn_error *
+drgn_dwarf_index_find_die(uintptr_t die_addr,
+			  struct drgn_debug_info_module *module, Dwarf_Die *ret)
+{
+	return drgn_dwarf_index_get_die(
+		&(struct drgn_dwarf_index_die){.addr = die_addr,
+					       .module = module},
+		ret);
+}
+struct drgn_error *
+drgn_abstract_origin_module(struct drgn_program *prog,
+			    uintptr_t abstract_origin,
+			    struct drgn_debug_info_module **ret)
+{
+	struct drgn_inlined_map_entry *entry =
+		drgn_inlined_map_search(&prog->dbinfo->dwarf.inlined_map,
+					&abstract_origin)
+			.entry;
+	if (!entry)
+		return drgn_error_format(
+			DRGN_ERROR_LOOKUP,
+			"no abstract origin exists with DWARF DIE address 0x%lx",
+			abstract_origin);
+	*ret = entry->value.module;
+	return NULL;
+}
