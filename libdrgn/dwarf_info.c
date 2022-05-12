@@ -2183,7 +2183,7 @@ index_inlined_function(struct drgn_inlined_map *inlined_map,
 static struct drgn_error *
 index_abstract_origin(struct drgn_inlined_map *inlined_map,
 		      uintptr_t abstract_origin,
-		      struct drgn_debug_info_module *module)
+		      struct drgn_module *module)
 {
 	struct drgn_inlined_map_entry entry = {
 		.key = abstract_origin,
@@ -8815,6 +8815,71 @@ err:
 	return err;
 }
 
+struct drgn_type_inlined_instances_iterator {
+	struct drgn_type *abstract_root;
+	struct drgn_module *module;
+	// Iterator over the DWARF DIE addresses of the inlined instances
+	// corresponding to the given abstract_root.
+	struct uintptr_set_iterator it;
+};
+
+LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_init(
+	struct drgn_type *type,
+	struct drgn_type_inlined_instances_iterator **ret)
+{
+	if (drgn_type_kind(type) != DRGN_TYPE_FUNCTION)
+		return drgn_error_create(
+			DRGN_ERROR_INVALID_ARGUMENT,
+			"cannot find inlined instances of a type that is not a function");
+	struct drgn_program *prog = type->_private.program;
+	*ret = malloc(sizeof(**ret));
+	if (!*ret)
+		return &drgn_enomem;
+	struct drgn_inlined_map_entry *entry =
+		drgn_inlined_map_search(&prog->dbinfo->dwarf.inlined_map,
+					&type->_private.die_addr)
+			.entry;
+	(*ret)->abstract_root = type;
+	(*ret)->module = entry ? entry->value.module : NULL;
+	(*ret)->it = entry ? uintptr_set_first(&entry->value.inlined_instances) :
+				   (struct uintptr_set_iterator){};
+	return NULL;
+}
+
+LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_next(
+	struct drgn_type_inlined_instances_iterator *iter,
+	struct drgn_type **ret)
+{
+	if (!iter->it.entry) {
+		*ret = NULL;
+		return NULL;
+	}
+	Dwarf_Die die;
+	struct drgn_error *err;
+	err = drgn_dwarf_index_get_die(
+		&(struct drgn_dwarf_index_die){
+			.module = iter->module,
+			.addr = *iter->it.entry},
+		&die);
+	iter->it = uintptr_set_next(iter->it);
+	if (err)
+		return err;
+	struct drgn_qualified_type type;
+	err = drgn_type_from_dwarf(
+		iter->abstract_root->_private.program->dbinfo,
+		iter->module, &die, &type);
+	if (err)
+		return err;
+	*ret = type.type;
+	return NULL;
+}
+
+LIBDRGN_PUBLIC void drgn_type_inlined_instances_iterator_destroy(
+	struct drgn_type_inlined_instances_iterator *iter)
+{
+	free(iter);
+}
+
 LIBDRGN_PUBLIC struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type,
 						      Dwarf_Die *ret)
 {
@@ -8822,4 +8887,31 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type,
 		&(struct drgn_dwarf_index_die){.addr = type->_private.die_addr,
 					       .module = type->_private.module},
 		ret);
+}
+
+struct drgn_error *
+drgn_dwarf_index_find_die(uintptr_t die_addr,
+			  struct drgn_module *module, Dwarf_Die *ret)
+{
+	return drgn_dwarf_index_get_die(
+		&(struct drgn_dwarf_index_die){.addr = die_addr,
+					       .module = module},
+		ret);
+}
+struct drgn_error *
+drgn_abstract_origin_module(struct drgn_program *prog,
+			    uintptr_t abstract_origin,
+			    struct drgn_module **ret)
+{
+	struct drgn_inlined_map_entry *entry =
+		drgn_inlined_map_search(&prog->dbinfo->dwarf.inlined_map,
+					&abstract_origin)
+			.entry;
+	if (!entry)
+		return drgn_error_format(
+			DRGN_ERROR_LOOKUP,
+			"no abstract origin exists with DWARF DIE address 0x%lx",
+			abstract_origin);
+	*ret = entry->value.module;
+	return NULL;
 }
