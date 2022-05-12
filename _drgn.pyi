@@ -1898,6 +1898,9 @@ class Type:
     def fully_qualified_name(self) -> str:
         """Get the fully qualified name of this type."""
         ...
+    def die_offset(self) -> int:
+        """Get the offset of the DWARF DIE corresponding to this type."""
+        ...
     def is_complete(self) -> bool:
         """
         Get whether this type is complete (i.e., the type definition is known).

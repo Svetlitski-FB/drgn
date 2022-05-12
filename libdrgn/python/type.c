@@ -4,6 +4,7 @@
 #include <stdarg.h>
 
 #include "drgnpy.h"
+#include "../dwarf_info.h"
 #include "../lazy_object.h"
 #include "../platform.h"
 #include "../program.h"
@@ -666,6 +667,16 @@ static PyObject *DrgnType_fully_qualified_name(DrgnType *self)
 	return ret;
 }
 
+static PyObject *DrgnType_die_offset(DrgnType *self)
+{
+	Dwarf_Die die;
+	struct drgn_error *err = drgn_type_dwarf_die(self->type, &die);
+	if (err)
+		return set_drgn_error(err);
+	Dwarf_Off offset = dwarf_dieoffset(&die);
+	return PyLong_FromLong(offset);
+}
+
 static PyObject *DrgnType_is_complete(DrgnType *self)
 {
 	Py_RETURN_BOOL(drgn_type_is_complete(self->type));
@@ -766,6 +777,8 @@ static PyMethodDef DrgnType_methods[] = {
 	 drgn_Type_type_name_DOC},
 	{"fully_qualified_name", (PyCFunction)DrgnType_fully_qualified_name, METH_NOARGS,
 	 drgn_Type_fully_qualified_name_DOC},
+	{"die_offset", (PyCFunction)DrgnType_die_offset, METH_NOARGS,
+	 drgn_Type_die_offset_DOC},
 	{"is_complete", (PyCFunction)DrgnType_is_complete, METH_NOARGS,
 	 drgn_Type_is_complete_DOC},
 	{"qualified", (PyCFunction)DrgnType_qualified,

@@ -8359,3 +8359,11 @@ err:
 	free(ancestors);
 	return err;
 }
+
+struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type, Dwarf_Die *ret)
+{
+	return drgn_dwarf_index_get_die(
+		&(struct drgn_dwarf_index_die){.addr = type->_private.die_addr,
+					       .file = type->_private.file},
+		ret);
+}

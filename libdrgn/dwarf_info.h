@@ -307,6 +307,8 @@ drgn_eval_cfi_dwarf_expression(struct drgn_program *prog,
 			       const struct drgn_register_state *regs,
 			       void *buf, size_t size);
 
+struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type, Dwarf_Die *ret);
+
 /** @} */
 
 #endif /* DRGN_DEBUG_INFO_DWARF_H */
