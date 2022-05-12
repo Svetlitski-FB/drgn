@@ -73,7 +73,7 @@ DEFINE_HASH_TABLE_FUNCTIONS(drgn_inlined_group_set, drgn_inlined_group_to_key,
 static void drgn_inlined_map_deep_deinit(struct drgn_inlined_map *inlined_map) {
 	for (struct drgn_inlined_map_iterator iter = drgn_inlined_map_first(inlined_map);
 	     iter.entry; iter = drgn_inlined_map_next(iter))
-		uintptr_set_deinit(&iter.entry->value);
+		uintptr_set_deinit(&iter.entry->value.inlined_instances);
 	drgn_inlined_map_deinit(inlined_map);
 }
 
@@ -362,7 +362,7 @@ drgn_inlined_functions_iterator_next(struct drgn_inlined_functions_iterator *it,
 	it->entry.linkage_name = dwarf_attr_integrate(&die, DW_AT_linkage_name, &attr) ? dwarf_formstring(&attr) : NULL;
 	// END OI-SPECIFIC
 
-	size_t num_inlined_instances = uintptr_set_size(&it->iter.entry->value);
+	size_t num_inlined_instances = uintptr_set_size(&it->iter.entry->value.inlined_instances);
 	struct drgn_inlined_instance **instances = &it->entry.inlined_instances;
 	if (num_inlined_instances > it->capacity) {
 		// Deliberately not using `realloc` here since we're going to overwrite the contents,
@@ -376,7 +376,7 @@ drgn_inlined_functions_iterator_next(struct drgn_inlined_functions_iterator *it,
 
 	size_t num_valid_instances = 0;
 	for (struct uintptr_set_iterator uintptr_iter =
-	     uintptr_set_first(&it->iter.entry->value);
+	     uintptr_set_first(&it->iter.entry->value.inlined_instances);
 	     uintptr_iter.entry;
 	     uintptr_iter = uintptr_set_next(uintptr_iter)) {
 		struct drgn_inlined_instance *instance = &(*instances)[num_valid_instances];
@@ -532,7 +532,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	 * Instructions > 0 and <= INSN_MAX_SKIP indicate a number of bytes to
 	 * be skipped over.
 	 */
-	INSN_MAX_SKIP = 185,
+	INSN_MAX_SKIP = 184,
 
 	/* These instructions indicate an attribute that can be skipped over. */
 	INSN_SKIP_BLOCK,
@@ -611,6 +611,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	INSN_ABSTRACT_ORIGIN_REF_ADDR4,
 	INSN_ABSTRACT_ORIGIN_REF_ADDR8,
 	INSN_SIGNATURE_REF_SIG8,
+	INSN_INLINE,
 
 	NUM_INSNS,
 
@@ -907,6 +908,18 @@ static struct drgn_error *dw_at_signature_to_insn(struct drgn_dwarf_index_cu *cu
 					   form);
 	}
 	*insn_ret = INSN_SIGNATURE_REF_SIG8;
+	return NULL;
+}
+
+static struct drgn_error *dw_at_inline_to_insn(struct drgn_dwarf_index_cu *cu, struct binary_buffer *bb,
+						uint64_t form,
+						uint8_t *insn_ret) {
+	if (form != DW_FORM_data1) {
+		return binary_buffer_error(bb,
+					   "unknown attribute form %#" PRIx64 " for DW_AT_inline",
+					   form);
+	}
+	*insn_ret = INSN_INLINE;
 	return NULL;
 }
 
@@ -1367,6 +1380,9 @@ read_abbrev_decl(struct drgn_elf_file_section_buffer *buffer,
 				break;
 			case DW_AT_signature:
 				err = dw_at_signature_to_insn(cu, &buffer->bb, form, &insn);
+				break;
+			case DW_AT_inline:
+				err = dw_at_inline_to_insn(cu, &buffer->bb, form, &insn);
 				break;
 			default:
 				err = dw_form_to_insn(cu, &buffer->bb, form, &insn);
@@ -2132,11 +2148,29 @@ index_inlined_function(struct drgn_inlined_map *inlined_map,
 		       uintptr_t abstract_origin, uintptr_t addr)
 {
 	struct drgn_inlined_map_entry entry = {.key = abstract_origin,
-					       .value = HASH_TABLE_INIT};
+					       .value = {.inlined_instances = HASH_TABLE_INIT}};
 	struct drgn_inlined_map_iterator iter;
 	return drgn_inlined_map_insert(inlined_map, &entry, &iter) < 0 ||
-	       uintptr_set_insert(&iter.entry->value, &addr, NULL) < 0 ?
+	       uintptr_set_insert(&iter.entry->value.inlined_instances, &addr, NULL) < 0 ?
 			     &drgn_enomem : NULL;
+}
+
+static struct drgn_error *
+index_abstract_origin(struct drgn_inlined_map *inlined_map,
+		      uintptr_t abstract_origin,
+		      struct drgn_elf_file *file)
+{
+	struct drgn_inlined_map_entry entry = {
+		.key = abstract_origin,
+		.value = {.inlined_instances = HASH_TABLE_INIT,
+			  .file = file}};
+	struct drgn_inlined_map_iterator iter;
+	int result = drgn_inlined_map_insert(inlined_map, &entry, &iter);
+	if (result < 0)
+		return &drgn_enomem;
+	if (result == 0)
+		iter.entry->value.file = file;
+	return NULL;
 }
 
 static struct drgn_error *
@@ -2248,6 +2282,7 @@ index_cu_first_pass(struct drgn_debug_info *dbinfo,
 		const char* abstract_origin = NULL;
 		uint8_t insn;
 		uint8_t extra_die_flags = 0;
+		int8_t inlined = DW_INL_not_inlined;
 		while ((insn = *insnp++) != INSN_END) {
 indirect_insn:;
 			uint64_t skip, tmp;
@@ -2506,6 +2541,11 @@ str_offsets_base:
 					declaration = true;
 				break;
 			}
+			case INSN_INLINE:
+				if ((err = binary_buffer_next_s8(&buffer->bb,
+								 &inlined)))
+					return err;
+				break;
 			case INSN_SPECIFICATION_REF1:
 				if ((err = binary_buffer_next_u8_into_u64(&buffer->bb,
 									  &tmp)))
@@ -2621,6 +2661,9 @@ skip:
 
 		if (abstract_origin && (err = index_inlined_function(inlined_map, (uintptr_t)abstract_origin, die_addr)))
 			return err;
+		if (inlined == DW_INL_declared_inlined || inlined == DW_INL_inlined)
+			if ((err = index_abstract_origin(inlined_map, die_addr, cu->file)))
+				return err;
 
 		if (insn & INSN_DIE_FLAG_CHILDREN) {
 			if (sibling &&
@@ -2798,6 +2841,7 @@ index_cu_second_pass(struct drgn_namespace_dwarf_index *ns,
 		uint64_t signature = 0;
 		uint8_t insn;
 		uint8_t extra_die_flags = 0;
+		int8_t inlined = DW_INL_not_inlined;
 		while ((insn = *insnp++) != INSN_END) {
 indirect_insn:;
 			uint64_t skip, tmp;
@@ -3047,6 +3091,11 @@ name_alt_strp:
 					declaration = true;
 				break;
 			}
+			case INSN_INLINE:
+				if ((err = binary_buffer_next_s8(&buffer->bb,
+								 &inlined)))
+					return err;
+				break;
 			case INSN_SPECIFICATION_REF1:
 				specification = true;
 				fallthrough;
@@ -3175,6 +3224,9 @@ skip:
 		}
 		if (abstract_origin && (err = index_inlined_function(inlined_map, (uintptr_t)abstract_origin, die_addr)))
 			return err;
+		if (inlined == DW_INL_declared_inlined || inlined == DW_INL_inlined)
+			if ((err = index_abstract_origin(inlined_map, die_addr, cu->file)))
+				return err;
 
 next:
 		if (insn & INSN_DIE_FLAG_CHILDREN) {
@@ -3293,8 +3345,10 @@ static bool union_maps(struct drgn_inlined_map *restrict dst,
 		case -1:
 			return false;
 		case 0:
-			union_sets(&dst_iter.entry->value,
-				   &src_iter.entry->value);
+			if (!dst_iter.entry->value.file && src_iter.entry->value.file)
+				dst_iter.entry->value.file = src_iter.entry->value.file;
+			union_sets(&dst_iter.entry->value.inlined_instances,
+				   &src_iter.entry->value.inlined_instances);
 			src_iter = drgn_inlined_map_next(src_iter);
 			break;
 		case 1:
@@ -8782,6 +8836,91 @@ err:
 	return err;
 }
 
+struct drgn_type_inlined_instances_iterator {
+	struct drgn_type *abstract_root;
+	struct drgn_elf_file *file;
+	struct drgn_module *module;
+	size_t index;
+	size_t length;
+	// DWARF DIE addresses of the inlined instances
+	// corresponding to the given abstract_root, sorted.
+	uintptr_t *instance_addrs;
+};
+
+static inline int compare_uintptrs(const void *a, const void *b)
+{
+	return *((const uintptr_t *)a) - *((const uintptr_t *)b);
+}
+
+LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_init(
+	struct drgn_type *type,
+	struct drgn_type_inlined_instances_iterator **ret)
+{
+	if (drgn_type_kind(type) != DRGN_TYPE_FUNCTION)
+		return drgn_error_create(
+			DRGN_ERROR_INVALID_ARGUMENT,
+			"cannot find inlined instances of a type that is not a function");
+	struct drgn_program *prog = type->_private.program;
+	*ret = malloc(sizeof(**ret));
+	if (!*ret)
+		return &drgn_enomem;
+	struct drgn_inlined_map_entry *entry =
+		drgn_inlined_map_search(&prog->dbinfo->dwarf.inlined_map,
+					&type->_private.die_addr)
+			.entry;
+	(*ret)->abstract_root = type;
+	(*ret)->file = entry ? entry->value.file : NULL;
+	(*ret)->index = 0;
+	(*ret)->length = uintptr_set_size(&entry->value.inlined_instances);
+	(*ret)->instance_addrs =
+		malloc(sizeof(*(*ret)->instance_addrs) * (*ret)->length);
+	if (!(*ret)->instance_addrs)
+		return &drgn_enomem;
+	struct uintptr_set_iterator it =
+		uintptr_set_first(&entry->value.inlined_instances);
+	for (size_t i = 0; i < (*ret)->length; i++) {
+		(*ret)->instance_addrs[i] = *it.entry;
+		it = uintptr_set_next(it);
+	}
+	qsort((*ret)->instance_addrs, (*ret)->length,
+	      sizeof(*(*ret)->instance_addrs), compare_uintptrs);
+	return NULL;
+}
+
+LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_next(
+	struct drgn_type_inlined_instances_iterator *iter,
+	struct drgn_type **ret)
+{
+	if (iter->index >= iter->length) {
+		*ret = NULL;
+		return NULL;
+	}
+	Dwarf_Die die;
+	struct drgn_error *err;
+	err = drgn_dwarf_index_get_die(
+		&(struct drgn_dwarf_index_die){
+			.file = iter->file,
+			.addr = iter->instance_addrs[iter->index++]},
+		&die);
+	if (err)
+		return err;
+	struct drgn_qualified_type type;
+	err = drgn_type_from_dwarf(
+		iter->abstract_root->_private.program->dbinfo,
+		iter->file, &die, &type);
+	if (err)
+		return err;
+	*ret = type.type;
+	return NULL;
+}
+
+LIBDRGN_PUBLIC void drgn_type_inlined_instances_iterator_destroy(
+	struct drgn_type_inlined_instances_iterator *iter)
+{
+	free(iter->instance_addrs);
+	free(iter);
+}
+
 LIBDRGN_PUBLIC struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type,
 						      Dwarf_Die *ret)
 {
@@ -8789,4 +8928,32 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_dwarf_die(struct drgn_type *type,
 		&(struct drgn_dwarf_index_die){.addr = type->_private.die_addr,
 					       .file = type->_private.file},
 		ret);
+}
+
+struct drgn_error *
+drgn_dwarf_index_find_die(uintptr_t die_addr,
+			  struct drgn_elf_file *file, Dwarf_Die *ret)
+{
+	return drgn_dwarf_index_get_die(
+		&(struct drgn_dwarf_index_die){.addr = die_addr,
+					       .file = file},
+		ret);
+}
+
+struct drgn_error *
+drgn_abstract_origin_file(struct drgn_program *prog,
+			    uintptr_t abstract_origin,
+			    struct drgn_elf_file **ret)
+{
+	struct drgn_inlined_map_entry *entry =
+		drgn_inlined_map_search(&prog->dbinfo->dwarf.inlined_map,
+					&abstract_origin)
+			.entry;
+	if (!entry)
+		return drgn_error_format(
+			DRGN_ERROR_LOOKUP,
+			"no abstract origin exists with DWARF DIE address 0x%lx",
+			abstract_origin);
+	*ret = entry->value.file;
+	return NULL;
 }
