@@ -3004,6 +3004,19 @@ drgn_inlined_group_dup(const struct drgn_inlined_group *group,
 /** Free a @ref drgn_inlined_group. */
 void drgn_inlined_group_destroy(struct drgn_inlined_group *group);
 
+struct drgn_type_inlined_instances_iterator;
+
+struct drgn_error *drgn_type_inlined_instances_iterator_init(
+  struct drgn_type *type,
+	struct drgn_type_inlined_instances_iterator **ret);
+
+struct drgn_error *drgn_type_inlined_instances_iterator_next(
+	struct drgn_type_inlined_instances_iterator *iter,
+	struct drgn_type **ret);
+
+void drgn_type_inlined_instances_iterator_destroy(
+	struct drgn_type_inlined_instances_iterator *iter);
+
 /** @} */
 
 /**
