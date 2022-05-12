@@ -73,7 +73,7 @@ DEFINE_HASH_TABLE_FUNCTIONS(drgn_inlined_group_set, drgn_inlined_group_to_key,
 static void drgn_inlined_map_deep_deinit(struct drgn_inlined_map *inlined_map) {
 	for (struct drgn_inlined_map_iterator iter = drgn_inlined_map_first(inlined_map);
 	     iter.entry; iter = drgn_inlined_map_next(iter))
-		uintptr_set_deinit(&iter.entry->value);
+		uintptr_set_deinit(&iter.entry->value.inlined_instances);
 	drgn_inlined_map_deinit(inlined_map);
 }
 
@@ -362,7 +362,7 @@ drgn_inlined_functions_iterator_next(struct drgn_inlined_functions_iterator *it,
 	it->entry.linkage_name = dwarf_attr_integrate(&die, DW_AT_linkage_name, &attr) ? dwarf_formstring(&attr) : NULL;
 	// END OI-SPECIFIC
 
-	size_t num_inlined_instances = uintptr_set_size(&it->iter.entry->value);
+	size_t num_inlined_instances = uintptr_set_size(&it->iter.entry->value.inlined_instances);
 	struct drgn_inlined_instance **instances = &it->entry.inlined_instances;
 	if (num_inlined_instances > it->capacity) {
 		// Deliberately not using `realloc` here since we're going to overwrite the contents,
@@ -376,7 +376,7 @@ drgn_inlined_functions_iterator_next(struct drgn_inlined_functions_iterator *it,
 
 	size_t num_valid_instances = 0;
 	for (struct uintptr_set_iterator uintptr_iter =
-	     uintptr_set_first(&it->iter.entry->value);
+	     uintptr_set_first(&it->iter.entry->value.inlined_instances);
 	     uintptr_iter.entry;
 	     uintptr_iter = uintptr_set_next(uintptr_iter)) {
 		struct drgn_inlined_instance *instance = &(*instances)[num_valid_instances];
@@ -587,7 +587,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	 * Instructions > 0 and <= INSN_MAX_SKIP indicate a number of bytes to
 	 * be skipped over.
 	 */
-	INSN_MAX_SKIP = 185,
+	INSN_MAX_SKIP = 184,
 
 	/* These instructions indicate an attribute that can be skipped over. */
 	INSN_SKIP_BLOCK,
@@ -666,6 +666,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	INSN_ABSTRACT_ORIGIN_REF_ADDR4,
 	INSN_ABSTRACT_ORIGIN_REF_ADDR8,
 	INSN_SIGNATURE_REF_SIG8,
+	INSN_INLINE,
 
 	NUM_INSNS,
 
@@ -959,6 +960,18 @@ static struct drgn_error *dw_at_signature_to_insn(struct drgn_dwarf_index_cu *cu
 					   form);
 	}
 	*insn_ret = INSN_SIGNATURE_REF_SIG8;
+	return NULL;
+}
+
+static struct drgn_error *dw_at_inline_to_insn(struct drgn_dwarf_index_cu *cu, struct binary_buffer *bb,
+						uint64_t form,
+						uint8_t *insn_ret) {
+	if (form != DW_FORM_data1) {
+		return binary_buffer_error(bb,
+					   "unknown attribute form %#" PRIx64 " for DW_AT_inline",
+					   form);
+	}
+	*insn_ret = INSN_INLINE;
 	return NULL;
 }
 
@@ -1419,6 +1432,9 @@ read_abbrev_decl(struct drgn_debug_info_buffer *buffer,
 				break;
 			case DW_AT_signature:
 				err = dw_at_signature_to_insn(cu, &buffer->bb, form, &insn);
+				break;
+			case DW_AT_inline:
+				err = dw_at_inline_to_insn(cu, &buffer->bb, form, &insn);
 				break;
 			default:
 				err = dw_form_to_insn(cu, &buffer->bb, form, &insn);
@@ -2181,11 +2197,29 @@ index_inlined_function(struct drgn_inlined_map *inlined_map,
 		       uintptr_t abstract_origin, uintptr_t addr)
 {
 	struct drgn_inlined_map_entry entry = {.key = abstract_origin,
-					       .value = HASH_TABLE_INIT};
+					       .value = {.inlined_instances = HASH_TABLE_INIT}};
 	struct drgn_inlined_map_iterator iter;
 	return drgn_inlined_map_insert(inlined_map, &entry, &iter) < 0 ||
-	       uintptr_set_insert(&iter.entry->value, &addr, NULL) < 0 ?
+	       uintptr_set_insert(&iter.entry->value.inlined_instances, &addr, NULL) < 0 ?
 			     &drgn_enomem : NULL;
+}
+
+static struct drgn_error *
+index_abstract_origin(struct drgn_inlined_map *inlined_map,
+		      uintptr_t abstract_origin,
+		      struct drgn_debug_info_module *module)
+{
+	struct drgn_inlined_map_entry entry = {
+		.key = abstract_origin,
+		.value = {.inlined_instances = HASH_TABLE_INIT,
+			  .module = module}};
+	struct drgn_inlined_map_iterator iter;
+	int result = drgn_inlined_map_insert(inlined_map, &entry, &iter);
+	if (result < 0)
+		return &drgn_enomem;
+	if (result == 0)
+		iter.entry->value.module = module;
+	return NULL;
 }
 
 static struct drgn_error *
@@ -2297,6 +2331,7 @@ index_cu_first_pass(struct drgn_debug_info *dbinfo,
 		const char* abstract_origin = NULL;
 		uint8_t insn;
 		uint8_t extra_die_flags = 0;
+		int8_t inlined = DW_INL_not_inlined;
 		while ((insn = *insnp++) != INSN_END) {
 indirect_insn:;
 			uint64_t skip, tmp;
@@ -2555,6 +2590,11 @@ str_offsets_base:
 					declaration = true;
 				break;
 			}
+			case INSN_INLINE:
+				if ((err = binary_buffer_next_s8(&buffer->bb,
+								 &inlined)))
+					return err;
+				break;
 			case INSN_SPECIFICATION_REF1:
 				if ((err = binary_buffer_next_u8_into_u64(&buffer->bb,
 									  &tmp)))
@@ -2670,6 +2710,9 @@ skip:
 
 		if (abstract_origin && (err = index_inlined_function(inlined_map, (uintptr_t)abstract_origin, die_addr)))
 			return err;
+		if (inlined == DW_INL_declared_inlined || inlined == DW_INL_inlined)
+			if ((err = index_abstract_origin(inlined_map, die_addr, cu->module)))
+				return err;
 
 		if (insn & INSN_DIE_FLAG_CHILDREN) {
 			if (sibling &&
@@ -2851,6 +2894,7 @@ index_cu_second_pass(struct drgn_namespace_dwarf_index *ns,
 		uint64_t signature = 0;
 		uint8_t insn;
 		uint8_t extra_die_flags = 0;
+		int8_t inlined = DW_INL_not_inlined;
 		while ((insn = *insnp++) != INSN_END) {
 indirect_insn:;
 			uint64_t skip, tmp;
@@ -3100,6 +3144,11 @@ name_alt_strp:
 					declaration = true;
 				break;
 			}
+			case INSN_INLINE:
+				if ((err = binary_buffer_next_s8(&buffer->bb,
+								 &inlined)))
+					return err;
+				break;
 			case INSN_SPECIFICATION_REF1:
 				specification = true;
 				/* fallthrough */
@@ -3229,6 +3278,9 @@ skip:
 		}
 		if (abstract_origin && (err = index_inlined_function(inlined_map, (uintptr_t)abstract_origin, die_addr)))
 			return err;
+		if (inlined == DW_INL_declared_inlined || inlined == DW_INL_inlined)
+			if ((err = index_abstract_origin(inlined_map, die_addr, cu->module)))
+				return err;
 
 next:
 		if (insn & INSN_DIE_FLAG_CHILDREN) {
@@ -3346,8 +3398,10 @@ static bool union_maps(struct drgn_inlined_map *restrict dst,
 		case -1:
 			return false;
 		case 0:
-			union_sets(&dst_iter.entry->value,
-				   &src_iter.entry->value);
+			if (!dst_iter.entry->value.module && src_iter.entry->value.module)
+				dst_iter.entry->value.module = src_iter.entry->value.module;
+			union_sets(&dst_iter.entry->value.inlined_instances,
+				   &src_iter.entry->value.inlined_instances);
 			src_iter = drgn_inlined_map_next(src_iter);
 			break;
 		case 1:
