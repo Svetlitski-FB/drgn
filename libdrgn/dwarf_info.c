@@ -9068,63 +9068,104 @@ drgn_oil_type_iterator_create(struct drgn_program *prog,
 #define CODEGEN_HANDLER_PREFIX "CodegenHandler<"
 #define CODEGEN_HANDLER_PREFIX_LENGTH (sizeof(CODEGEN_HANDLER_PREFIX) - 1)
 
+DEFINE_VECTOR(uintptr_vector, uintptr_t)
+
 LIBDRGN_PUBLIC
-struct drgn_error *drgn_oil_type_iterator_next(struct drgn_type_iterator *iter, struct drgn_qualified_type **type_ret, uintptr_t *function_addr_ret) {
+struct drgn_error *drgn_oil_type_iterator_next(struct drgn_type_iterator *iter,
+					       struct drgn_qualified_type **type_ret,
+					       uintptr_t **function_addrs_ret,
+					       size_t *function_addrs_len_ret)
+{
 	struct drgn_dwarf_index_die *index_die;
-	struct drgn_error *err;
+	struct drgn_error *err = NULL;
+	struct uintptr_vector function_addrs_vec = VECTOR_INIT;
+
 	while ((index_die = drgn_dwarf_index_iterator_next(&iter->it))) {
 		Dwarf_Die class_die;
 		err = drgn_dwarf_index_get_die(index_die, &class_die);
 		if (err)
-			return err;
+			goto out;
+
 		Dwarf_Attribute name_attr;
-		if (dwarf_attr_integrate(&class_die, DW_AT_name, &name_attr)) {
-			const char* name = dwarf_formstring(&name_attr);
-			if (name && strncmp(name, CODEGEN_HANDLER_PREFIX, CODEGEN_HANDLER_PREFIX_LENGTH) == 0) {
-				Dwarf_Die child, template_parameter;
-				if (dwarf_child(&class_die, &child) != 0)
-					return drgn_error_format(DRGN_ERROR_LOOKUP, "DWARF DIE with address 0x%lx has no children", (uintptr_t) class_die.addr);
-				bool template_parameter_found = false, get_object_size_func_found = false, has_sibling = true;
-				while (has_sibling && !(template_parameter_found && get_object_size_func_found)) {
-					if (dwarf_tag(&child) == DW_TAG_template_type_parameter) {
-						template_parameter = child;
-						template_parameter_found = true;
-					} else if (dwarf_tag(&child) == DW_TAG_subprogram) {
-						const char* child_name = dwarf_diename(&child);
-						if (child_name && strcmp(child_name, "getObjectSize") == 0) {
-							Dwarf_Attribute linkage_name_attr;
-							if (dwarf_attr_integrate(&child, DW_AT_linkage_name, &linkage_name_attr)) {
-								struct drgn_symbol *symbol;
-								// We need to check that the symbol exists here and not at the end of the loop because
-								// getObjectSize is overloaded in CodegenHandler: it's possible that not all of the various
-								// overloads are used, so we need to check that the one we're currently examining *is* used
-								// (by verifying that it exists in the symbol table).
-								err = drgn_program_find_symbol_by_name(iter->prog, dwarf_formstring(&linkage_name_attr), &symbol);
-								if (!err) {
-									*function_addr_ret = drgn_symbol_address(symbol);
-									drgn_symbol_destroy(symbol);
-									get_object_size_func_found = true;
-								} else {
-									drgn_error_destroy(err);
-								}
-							}
-						}
-					}
-					has_sibling = dwarf_siblingof(&child, &child) == 0;
+		if (!dwarf_attr_integrate(&class_die, DW_AT_name, &name_attr))
+			continue;
+
+		const char* name = dwarf_formstring(&name_attr);
+		if (!name || strncmp(name, CODEGEN_HANDLER_PREFIX, CODEGEN_HANDLER_PREFIX_LENGTH) != 0)
+			continue;
+
+		Dwarf_Die child, template_parameter;
+		if (dwarf_child(&class_die, &child) != 0) {
+			err = drgn_error_format(DRGN_ERROR_LOOKUP,
+					"DWARF DIE with address 0x%lx has no children",
+					(uintptr_t) class_die.addr);
+			goto out;
+		}
+
+		bool template_parameter_found = false, get_object_size_func_found = false;
+		for (bool has_sibling = true;
+				 has_sibling && !(template_parameter_found && get_object_size_func_found);
+				 has_sibling = dwarf_siblingof(&child, &child) == 0) {
+			if (dwarf_tag(&child) == DW_TAG_template_type_parameter) {
+				template_parameter = child;
+				template_parameter_found = true;
+			} else if (dwarf_tag(&child) == DW_TAG_subprogram) {
+				const char* child_name = dwarf_diename(&child);
+				if (!child_name || strcmp(child_name, "getObjectSize") != 0)
+					continue;
+
+				Dwarf_Attribute linkage_name_attr;
+				if (!dwarf_attr_integrate(&child, DW_AT_linkage_name, &linkage_name_attr))
+					continue;
+
+				// Only return this function if it exists in the symbol table. Some
+				// overloads may have been removed by compiler optimisations.
+				struct drgn_symbol *symbol;
+				err = drgn_program_find_symbol_by_name(iter->prog,
+						dwarf_formstring(&linkage_name_attr), &symbol);
+				if (err) {
+					drgn_error_destroy(err);
+					continue;
 				}
-				if (!template_parameter_found)
-					return drgn_error_create(DRGN_ERROR_LOOKUP, "could not find template parameter within CodegenHandler");
-				if (!get_object_size_func_found)
-					return drgn_error_create(DRGN_ERROR_LOOKUP, "could not find getObjectSize within CodegenHandler");
-				err = drgn_type_from_dwarf_attr(iter->prog->dbinfo, index_die->module, &template_parameter, &drgn_language_cpp, false, false, NULL, &iter->curr);
-				if (err)
-					return err;
-				*type_ret = &iter->curr;
-				return NULL;
+
+				uintptr_t function_addr = drgn_symbol_address(symbol);
+				drgn_symbol_destroy(symbol);
+				if (!uintptr_vector_append(&function_addrs_vec, &function_addr)) {
+					err = &drgn_enomem;
+					goto out;
+				}
+
+				get_object_size_func_found = true;
 			}
 		}
+
+		if (!template_parameter_found) {
+			err = drgn_error_create(DRGN_ERROR_LOOKUP,
+					"could not find template parameter within CodegenHandler");
+			goto out;
+		}
+
+		if (!get_object_size_func_found) {
+			err = drgn_error_create(DRGN_ERROR_LOOKUP,
+					"could not find getObjectSize within CodegenHandler");
+			goto out;
+		}
+
+		err = drgn_type_from_dwarf_attr(iter->prog->dbinfo, index_die->module,
+				&template_parameter, &drgn_language_cpp, false, false, NULL, &iter->curr);
+		if (err)
+			goto out;
+
+		*type_ret = &iter->curr;
+		*function_addrs_ret = function_addrs_vec.data;
+		*function_addrs_len_ret = function_addrs_vec.size;
+		return NULL;
 	}
+
+out:
+	uintptr_vector_deinit(&function_addrs_vec);
 	*type_ret = NULL;
-	*function_addr_ret = 0;
-	return NULL;
+	*function_addrs_ret = NULL;
+	*function_addrs_len_ret = 0;
+	return err;
 }

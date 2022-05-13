@@ -2363,8 +2363,12 @@ static void TypeIterator_dealloc(TypeIterator *self) {
 
 static PyObject *TypeIterator_next(TypeIterator *self) {
 	struct drgn_qualified_type *type;
-	uintptr_t function_addr;
-	struct drgn_error *err = self->is_oil_iterator ? drgn_oil_type_iterator_next(self->iterator, &type, &function_addr) : drgn_type_iterator_next(self->iterator, &type);
+	uintptr_t *function_addrs;
+	size_t function_addrs_len;
+	struct drgn_error *err = self->is_oil_iterator
+		? drgn_oil_type_iterator_next(self->iterator, &type, &function_addrs,
+				&function_addrs_len)
+		: drgn_type_iterator_next(self->iterator, &type);
 	if (err)
 		return set_drgn_error(err);
 	return type ? DrgnType_wrap(*type) : NULL;

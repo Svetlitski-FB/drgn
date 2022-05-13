@@ -2972,7 +2972,9 @@ drgn_oil_type_iterator_create(struct drgn_program *prog,
 
 struct drgn_error *
 drgn_oil_type_iterator_next(struct drgn_type_iterator *iter,
-			    struct drgn_qualified_type **type_ret, uintptr_t *function_addr_ret);
+			    struct drgn_qualified_type **type_ret,
+			    uintptr_t **function_addrs_ret,
+			    size_t *function_addrs_len_ret);
 
 /**
  * @defgroup Inlined functions
