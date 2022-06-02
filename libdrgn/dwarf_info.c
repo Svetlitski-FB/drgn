@@ -8864,10 +8864,17 @@ err:
 struct drgn_type_inlined_instances_iterator {
 	struct drgn_type *abstract_root;
 	struct drgn_module *module;
-	// Iterator over the DWARF DIE addresses of the inlined instances
-	// corresponding to the given abstract_root.
-	struct uintptr_set_iterator it;
+	size_t index;
+	size_t length;
+	// DWARF DIE addresses of the inlined instances
+	// corresponding to the given abstract_root, sorted.
+	uintptr_t *instance_addrs;
 };
+
+static inline int compare_uintptrs(const void *a, const void *b)
+{
+	return *((const uintptr_t *)a) - *((const uintptr_t *)b);
+}
 
 LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_init(
 	struct drgn_type *type,
@@ -8887,8 +8894,20 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_init(
 			.entry;
 	(*ret)->abstract_root = type;
 	(*ret)->module = entry ? entry->value.module : NULL;
-	(*ret)->it = entry ? uintptr_set_first(&entry->value.inlined_instances) :
-				   (struct uintptr_set_iterator){};
+	(*ret)->index = 0;
+	(*ret)->length = uintptr_set_size(&entry->value.inlined_instances);
+	(*ret)->instance_addrs =
+		malloc(sizeof(*(*ret)->instance_addrs) * (*ret)->length);
+	if (!(*ret)->instance_addrs)
+		return &drgn_enomem;
+	struct uintptr_set_iterator it =
+		uintptr_set_first(&entry->value.inlined_instances);
+	for (size_t i = 0; i < (*ret)->length; i++) {
+		(*ret)->instance_addrs[i] = *it.entry;
+		it = uintptr_set_next(it);
+	}
+	qsort((*ret)->instance_addrs, (*ret)->length,
+	      sizeof(*(*ret)->instance_addrs), compare_uintptrs);
 	return NULL;
 }
 
@@ -8896,7 +8915,7 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_next(
 	struct drgn_type_inlined_instances_iterator *iter,
 	struct drgn_type **ret)
 {
-	if (!iter->it.entry) {
+	if (iter->index >= iter->length) {
 		*ret = NULL;
 		return NULL;
 	}
@@ -8905,15 +8924,14 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_next(
 	err = drgn_dwarf_index_get_die(
 		&(struct drgn_dwarf_index_die){
 			.module = iter->module,
-			.addr = *iter->it.entry},
+			.addr = iter->instance_addrs[iter->index++]},
 		&die);
-	iter->it = uintptr_set_next(iter->it);
 	if (err)
 		return err;
 	struct drgn_qualified_type type;
 	err = drgn_type_from_dwarf(
-		iter->abstract_root->_private.program->dbinfo,
-		iter->module, &die, &type);
+		iter->abstract_root->_private.program->dbinfo, iter->module,
+		&die, &type);
 	if (err)
 		return err;
 	*ret = type.type;
@@ -8923,6 +8941,7 @@ LIBDRGN_PUBLIC struct drgn_error *drgn_type_inlined_instances_iterator_next(
 LIBDRGN_PUBLIC void drgn_type_inlined_instances_iterator_destroy(
 	struct drgn_type_inlined_instances_iterator *iter)
 {
+	free(iter->instance_addrs);
 	free(iter);
 }
 
