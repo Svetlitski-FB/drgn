@@ -532,7 +532,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	 * Instructions > 0 and <= INSN_MAX_SKIP indicate a number of bytes to
 	 * be skipped over.
 	 */
-	INSN_MAX_SKIP = 184,
+	INSN_MAX_SKIP = 183,
 
 	/* These instructions indicate an attribute that can be skipped over. */
 	INSN_SKIP_BLOCK,
@@ -612,6 +612,7 @@ enum drgn_dwarf_index_abbrev_insn {
 	INSN_ABSTRACT_ORIGIN_REF_ADDR8,
 	INSN_SIGNATURE_REF_SIG8,
 	INSN_INLINE,
+	INSN_INLINE_IMPLICIT,
 
 	NUM_INSNS,
 
@@ -911,16 +912,24 @@ static struct drgn_error *dw_at_signature_to_insn(struct drgn_dwarf_index_cu *cu
 	return NULL;
 }
 
-static struct drgn_error *dw_at_inline_to_insn(struct drgn_dwarf_index_cu *cu, struct binary_buffer *bb,
-						uint64_t form,
-						uint8_t *insn_ret) {
-	if (form != DW_FORM_data1) {
+static struct drgn_error *dw_at_inline_to_insn(struct drgn_dwarf_index_cu *cu,
+					       struct binary_buffer *bb,
+					       uint64_t form, uint8_t *insn_ret, uint64_t *implicit_const_ret)
+{
+	switch (form) {
+	case DW_FORM_data1:
+		*insn_ret = INSN_INLINE;
+		return NULL;
+		break;
+	case DW_FORM_implicit_const:
+		*insn_ret = INSN_INLINE_IMPLICIT;
+		return binary_buffer_next_uleb128(bb, implicit_const_ret);
+	default:
 		return binary_buffer_error(bb,
-					   "unknown attribute form %#" PRIx64 " for DW_AT_inline",
+					   "unknown attribute form %#" PRIx64
+					   " for DW_AT_inline",
 					   form);
 	}
-	*insn_ret = INSN_INLINE;
-	return NULL;
 }
 
 static struct drgn_error *dw_at_abstract_origin_to_insn(struct drgn_dwarf_index_cu *cu, struct binary_buffer *bb,
@@ -1382,7 +1391,7 @@ read_abbrev_decl(struct drgn_elf_file_section_buffer *buffer,
 				err = dw_at_signature_to_insn(cu, &buffer->bb, form, &insn);
 				break;
 			case DW_AT_inline:
-				err = dw_at_inline_to_insn(cu, &buffer->bb, form, &insn);
+				err = dw_at_inline_to_insn(cu, &buffer->bb, form, &insn, &implicit_const);
 				break;
 			default:
 				err = dw_form_to_insn(cu, &buffer->bb, form, &insn);
@@ -1408,7 +1417,7 @@ read_abbrev_decl(struct drgn_elf_file_section_buffer *buffer,
 			if (!uint8_vector_append(insns, &insn))
 				return &drgn_enomem;
 
-			if (insn == INSN_DECL_FILE_IMPLICIT &&
+			if ((insn == INSN_DECL_FILE_IMPLICIT || insn == INSN_INLINE_IMPLICIT) &&
 			    !append_uleb128(insns, implicit_const))
 				return &drgn_enomem;
 		}
@@ -2546,6 +2555,10 @@ str_offsets_base:
 								 &inlined)))
 					return err;
 				break;
+			case INSN_INLINE_IMPLICIT:
+				while (*insnp++ & 0x80)
+					;
+				break;
 			case INSN_SPECIFICATION_REF1:
 				if ((err = binary_buffer_next_u8_into_u64(&buffer->bb,
 									  &tmp)))
@@ -3095,6 +3108,17 @@ name_alt_strp:
 				if ((err = binary_buffer_next_s8(&buffer->bb,
 								 &inlined)))
 					return err;
+				break;
+			case INSN_INLINE_IMPLICIT:
+				inlined = 0;
+				for (int shift = 0; ; shift += 7) {
+					uint8_t byte = *insnp++;
+					inlined |= (uint64_t)(byte & 0x7f) << shift;
+					if (!(byte & 0x80))
+						break;
+				}
+				// There are only 4 valid values for DW_AT_inline
+				assert(inlined >= 0 && inlined <= 3);
 				break;
 			case INSN_SPECIFICATION_REF1:
 				specification = true;
