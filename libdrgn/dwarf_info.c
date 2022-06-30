@@ -3683,6 +3683,8 @@ drgn_dwarf_index_iterator_next(struct drgn_dwarf_index_iterator *it)
 static struct drgn_error *
 drgn_dwarf_index_get_die(struct drgn_dwarf_index_die *die, Dwarf_Die *die_ret)
 {
+	if (!die->module)
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT, "No module found for DIE");
 	Dwarf_Addr bias;
 	Dwarf *dwarf = dwfl_module_getdwarf(die->module->dwfl_module, &bias);
 	if (!dwarf)
@@ -8788,8 +8790,10 @@ out:
 }
 
 LIBDRGN_PUBLIC struct drgn_error *
-drgn_type_fully_qualified_name(struct drgn_type *type, char **ret)
+drgn_type_fully_qualified_name(struct drgn_type *type, char **str_ret, size_t *len_ret)
 {
+	if (drgn_type_kind(type) == DRGN_TYPE_VOID)
+		return drgn_error_create(DRGN_ERROR_INVALID_ARGUMENT, "`void` does not have a fully qualified name");
 	Dwarf_Die die;
 	struct drgn_error *err;
 	// TODO fix this super ultra hack - we shouldn't be hijacking this function in this way
@@ -8805,9 +8809,9 @@ drgn_type_fully_qualified_name(struct drgn_type *type, char **ret)
 		return err;
 
 	struct string_builder fully_qualified_name = {};
-	// We know we're going to at least have the leading "::", the type name,
-	// and the null terminator, so we reserve a modest amount of space in order
-	// to avoid the first few reallocations where the capacity is _very_ small.
+	// We know we're going to at least have at least the type name and the null
+	// terminator, so we reserve a modest amount of space in order to avoid the
+	// first few reallocations where the capacity is _very_ small.
 	if (!string_builder_reserve(&fully_qualified_name, 16)) {
 		err = &drgn_enomem;
 		goto err;
@@ -8824,13 +8828,14 @@ drgn_type_fully_qualified_name(struct drgn_type *type, char **ret)
 		err = drgn_dwarf_die_name(current, &name);
 		if (err)
 			goto err;
-		if (!string_builder_appendf(&fully_qualified_name, "::%s",
-					    name)) {
+		if (!string_builder_appendf(&fully_qualified_name, "%s%s",
+						fully_qualified_name.len > 0 ? "::" : "", name)) {
 			err = &drgn_enomem;
 			goto err;
 		}
 	}
-	if (!(*ret = string_builder_null_terminate(&fully_qualified_name)))
+	*len_ret = fully_qualified_name.len;
+	if (!(*str_ret = string_builder_null_terminate(&fully_qualified_name)))
 		err = &drgn_enomem;
 err:
 	if (err)

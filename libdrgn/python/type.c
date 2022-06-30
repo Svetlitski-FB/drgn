@@ -655,12 +655,13 @@ static PyObject *DrgnType_type_name(DrgnType *self)
 static PyObject *DrgnType_fully_qualified_name(DrgnType *self)
 {
 	char *str;
+	size_t len;
 	struct drgn_error *err = drgn_type_fully_qualified_name(
-		DrgnType_unwrap(self).type, &str);
+		DrgnType_unwrap(self).type, &str, &len);
 	if (err)
 		return set_drgn_error(err);
 
-	PyObject *ret = PyUnicode_FromString(str);
+	PyObject *ret = PyUnicode_FromStringAndSize(str, len);
 	free(str);
 	return ret;
 }

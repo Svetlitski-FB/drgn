@@ -2131,7 +2131,7 @@ static inline const char *drgn_type_name(struct drgn_type *type)
  * Get the fully qualified name of a type.
  */
 struct drgn_error *drgn_type_fully_qualified_name(struct drgn_type *type,
-						  char **str_ret);
+						  char **str_ret, size_t *len_ret);
 
 /**
  * Get whether a kind of type has a size. This is true for integer, boolean,
