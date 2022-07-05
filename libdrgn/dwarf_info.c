@@ -6208,6 +6208,43 @@ static struct drgn_error *drgn_dwarf_peel(Dwarf_Die *die, Dwarf_Die *ret)
 		"Maximum depth exceeded while peeling DWARF DIE type");
 }
 
+static struct drgn_error *drgn_dwarf_remove_qualifiers(Dwarf_Die *die, Dwarf_Die *ret)
+{
+	*ret = *die;
+	// Set an aribtrary maximum depth to prevent entering an infinite
+	// loop due to malformed debug information.
+	for (int depth = 0; depth < 64; depth++) {
+		switch (dwarf_tag(ret)) {
+		case DW_TAG_const_type:
+		case DW_TAG_volatile_type:
+		case DW_TAG_restrict_type:
+		case DW_TAG_atomic_type:
+		case DW_TAG_immutable_type:
+		case DW_TAG_packed_type:
+		case DW_TAG_shared_type:
+		case DW_TAG_pointer_type:
+		case DW_TAG_reference_type:
+		case DW_TAG_rvalue_reference_type:  {
+			Dwarf_Attribute attr;
+			if (!dwarf_attr_integrate(ret, DW_AT_type, &attr))
+				return drgn_error_format(
+					DRGN_ERROR_INVALID_ARGUMENT,
+					"DWARF DIE with address 0x%lx was missing DW_AT_type attribute",
+					(uintptr_t)ret->addr);
+			if (!dwarf_formref_die(&attr, ret))
+				return drgn_error_libdw();
+		}
+		break;
+		default:
+			// Nothing left to remove
+			return NULL;
+		}
+	}
+	return drgn_error_create(
+		DRGN_ERROR_OTHER,
+		"Maximum depth exceeded while removing qualifiers from DWARF DIE type");
+}
+
 static struct drgn_error *drgn_dwarf_die_name(Dwarf_Die *die, const char **name)
 {
 	Dwarf_Attribute attr;
@@ -8801,6 +8838,10 @@ drgn_type_fully_qualified_name(struct drgn_type *type, char **str_ret, size_t *l
 		.addr = type->_private.die_addr,
 		.module = type->_private.module};
 	if ((err = drgn_dwarf_index_get_die(&hack_index, &die)))
+		return err;
+
+	err = drgn_dwarf_remove_qualifiers(&die, &die);
+	if (err)
 		return err;
 
 	Dwarf_Die *ancestors;
