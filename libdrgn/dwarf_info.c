@@ -6864,7 +6864,7 @@ drgn_compound_type_from_dwarf(struct drgn_debug_info *dbinfo,
 		dwarf_die_is_little_endian(die, false, &little_endian);
 	}
 
-	Dwarf_Die member = {}, child;
+	Dwarf_Die member = {}, child, child_param;
 	int r = dwarf_child(die, &child);
 	while (r == 0) {
 		switch (dwarf_tag(&child)) {
@@ -6900,6 +6900,17 @@ drgn_compound_type_from_dwarf(struct drgn_debug_info *dbinfo,
 						       &builder.template_builder);
 			if (err)
 				goto err;
+			break;
+		case DW_TAG_GNU_template_parameter_pack:
+			r = dwarf_child(&child, &child_param);
+			while (r == 0) {
+				err = parse_template_parameter(dbinfo, module, &child_param,
+							       drgn_dwarf_template_type_parameter_thunk_fn,
+							       &builder.template_builder);
+				if (err)
+					goto err;
+				r = dwarf_siblingof(&child_param, &child_param);
+			}
 			break;
 		case DW_TAG_inheritance:
 			err = parse_template_parameter(dbinfo, module, &child,

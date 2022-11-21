@@ -1680,6 +1680,55 @@ class TestTypes(TestCase):
                 )
             ).type("TEST").type.template_parameters[0].argument
 
+    def test_class_template_parameter_pack(self):
+        prog = dwarf_program(
+            wrap_test_type_dies(
+                DwarfDie(
+                    DW_TAG.class_type,
+                    (
+                        DwarfAttrib(DW_AT.name, DW_FORM.string, "variant<int, char>"),
+                        DwarfAttrib(DW_AT.declaration, DW_FORM.flag_present, True),
+                    ),
+                    (
+                        DwarfDie(
+                            DW_TAG.GNU_template_parameter_pack,
+                            (
+                                DwarfAttrib(DW_AT.name, DW_FORM.string, "_Types"),
+                            ),
+                            (
+                                DwarfDie(
+                                    DW_TAG.template_type_parameter,
+                                    (
+                                        DwarfAttrib(DW_AT.type, DW_FORM.ref4, "int_die"),
+                                        DwarfAttrib(DW_AT.name, DW_FORM.string, "T"),
+                                    ),
+                                ),
+                                DwarfDie(
+                                    DW_TAG.template_type_parameter,
+                                    (
+                                        DwarfAttrib(DW_AT.type, DW_FORM.ref4, "char_die"),
+                                        DwarfAttrib(DW_AT.name, DW_FORM.string, "C"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                *labeled_int_die,
+                *labeled_char_die,
+            )
+        )
+        self.assertIdentical(
+            prog.type("TEST").type,
+            prog.class_type(
+                "variant<int, char>",
+                template_parameters=(
+                    TypeTemplateParameter(prog.int_type("int", 4, True), "T"),
+                    TypeTemplateParameter(prog.int_type("char", 1, True), "C"),
+                ),
+            ),
+        )
+
     def test_lazy_cycle(self):
         prog = dwarf_program(
             wrap_test_type_dies(
