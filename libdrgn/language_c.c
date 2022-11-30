@@ -1707,13 +1707,19 @@ struct drgn_error *drgn_c_family_lexer_func(struct drgn_lexer *lexer,
 			token->kind = C_TOKEN_TEMPLATE_ARGUMENTS;
 			p++;
 			size_t less_thans = 1;
+			bool in_single_quotes = false;
 			do {
 				switch (*p++) {
 				case '<':
-					less_thans++;
+					if (!in_single_quotes)
+						less_thans++;
 					break;
 				case '>':
-					less_thans--;
+					if (!in_single_quotes)
+						less_thans--;
+					break;
+				case '\'':
+					in_single_quotes = !in_single_quotes;
 					break;
 				case '\0':
 					return drgn_error_create(DRGN_ERROR_SYNTAX,
