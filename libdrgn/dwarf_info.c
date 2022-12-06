@@ -6001,49 +6001,76 @@ out:
 	return err;
 }
 
-DEFINE_VECTOR(str_vector, const char*)
-static struct drgn_error *
-find_namespace_path(Dwarf_Die current, Dwarf_Die *target, struct str_vector *vec)
+static struct drgn_error *drgn_dwarf_peel(Dwarf_Die *die, Dwarf_Die *ret)
 {
-	Dwarf_Die child;
-
-	while (dwarf_siblingof(&current, &child) == 0
-	       && child.addr <= target->addr) {
-		// Skip past addresses which are lower even after a skip
-		current = child;
-	}
-
-	if (current.addr == target->addr)
-		return NULL;
-	if (current.addr > target->addr)
-		return drgn_error_libdw();
-
-	// Now all there is do do is dig
-	if (dwarf_tag(&current) == DW_TAG_namespace ||
-	    dwarf_tag(&current) == DW_TAG_class_type) {
-		const char* name;
-		// Handle type units on class dies
-		{
-			Dwarf_Die type_unit_die;
-			Dwarf_Attribute attr_mem;
-			Dwarf_Attribute *attr;
-			if ((attr = dwarf_attr_integrate(&current, DW_AT_signature, &attr_mem))) {
-				if (!dwarf_formref_die(attr, &type_unit_die))
-					return drgn_error_format(DRGN_ERROR_OTHER,
-								 "tag 0x%x has invalid DW_AT_signature", dwarf_tag(&current));
-				name = dwarf_diename(&type_unit_die);
-			} else {
-				name = dwarf_diename(&current);
-			}
+	*ret = *die;
+	// Set an aribtrary maximum depth to prevent entering an infinite
+	// loop due to malformed debug information.
+	for (int depth = 0; depth < 64; depth++) {
+		switch (dwarf_tag(ret)) {
+		case DW_TAG_typedef:
+		case DW_TAG_const_type:
+		case DW_TAG_volatile_type:
+		case DW_TAG_restrict_type:
+		case DW_TAG_atomic_type:
+		case DW_TAG_immutable_type:
+		case DW_TAG_packed_type:
+		case DW_TAG_shared_type: {
+			int result = dwarf_peel_type(ret, ret);
+			if (result == -1)
+				return drgn_error_libdw();
+			if (result == 1)
+				return NULL; // Nothing left to peel
+			// if result == 0, we proceed with peeling
 		}
-
-		if (!str_vector_append(vec, &name))
-			return &drgn_enomem;
+		break;
+		case DW_TAG_pointer_type:
+		case DW_TAG_reference_type:
+		case DW_TAG_rvalue_reference_type: {
+			Dwarf_Attribute attr;
+			if (!dwarf_attr_integrate(ret, DW_AT_type, &attr))
+				return drgn_error_format(
+					DRGN_ERROR_INVALID_ARGUMENT,
+					"DWARF DIE with address 0x%lx was missing DW_AT_type attribute",
+					(uintptr_t)ret->addr);
+			if (!dwarf_formref_die(&attr, ret))
+				return drgn_error_libdw();
+		}
+		break;
+		default:
+			// Nothing left to peel
+			return NULL;
+		}
 	}
+	return drgn_error_create(
+		DRGN_ERROR_OTHER,
+		"Maximum depth exceeded while peeling DWARF DIE type");
+}
 
-	if (dwarf_child(&current, &child) == 0)
-		return find_namespace_path(child, target, vec);
-	return drgn_error_libdw();
+static struct drgn_error *drgn_dwarf_die_name(Dwarf_Die *die, const char **name)
+{
+	Dwarf_Attribute attr;
+	Dwarf_Die peeled_type;
+	struct drgn_error *err = drgn_dwarf_peel(die, &peeled_type);
+	if (err)
+		return err;
+	// Handle type units on class dies
+	if (dwarf_attr_integrate(&peeled_type, DW_AT_signature, &attr)) {
+		Dwarf_Die type_unit_die;
+		if (!dwarf_formref_die(&attr, &type_unit_die))
+			return drgn_error_format(
+				DRGN_ERROR_OTHER,
+				"DWARF DIE at address %lx with has invalid DW_AT_signature",
+				(uintptr_t)peeled_type.addr);
+
+		err = drgn_dwarf_peel(&type_unit_die, &peeled_type);
+		if (err)
+			return err;
+	}
+	*name = dwarf_diename(&peeled_type);
+	if (!*name)
+		return drgn_error_format(DRGN_ERROR_INVALID_ARGUMENT, "DWARF DIE at address %lx does not have a name", (uintptr_t)peeled_type.addr);
+	return NULL;
 }
 
 /*
@@ -6079,49 +6106,43 @@ drgn_debug_info_find_complete(struct drgn_debug_info *dbinfo, uint64_t tag,
 	 */
 	struct drgn_dwarf_index_die *index_die =
 		drgn_dwarf_index_iterator_next(&it);
-	if (!index_die)
-	{
-		struct str_vector vec;
-		str_vector_init(&vec);
+	if (!index_die) {
+		Dwarf_Die *ancestors;
+		size_t num_ancestors;
+		err = drgn_find_die_ancestors(incomplete_die, &ancestors, &num_ancestors);
+		if (err)
+			return err;
 
-		Dwarf_Die cu_die;
-		dwarf_cu_die(incomplete_die->cu, &cu_die,
-			     NULL, NULL, NULL, NULL, NULL, NULL);
-
-		if ((err = find_namespace_path(cu_die, incomplete_die, &vec))) {
-			err = &drgn_not_found;
-			goto err;
-		}
-
-		struct drgn_namespace_dwarf_index *ns = &dbinfo->dwarf.global;
-		uint64_t ns_tag = DW_TAG_namespace;
-		for (int i = 0; i < vec.size; i++) {
-			err = drgn_dwarf_index_iterator_init(&it, ns, vec.data[i],
-							     strlen(vec.data[i]), &ns_tag, 1);
+		struct drgn_namespace_dwarf_index *namespace = &dbinfo->dwarf.global;
+		for (int i = 0; i < num_ancestors; i++) {
+			int tag = dwarf_tag(&ancestors[i]);
+			if (!(tag == DW_TAG_namespace || tag == DW_TAG_class_type || tag == DW_TAG_structure_type))
+				continue;
+			const char* ancestor_name;
+			err = drgn_dwarf_die_name(&ancestors[i], &ancestor_name);
+			if (err)
+				goto err;
+			// We are only checking for DW_TAG_namespace here because the hack
+			// presently in place indexes classes and structs as namespaces
+			err = drgn_dwarf_index_iterator_init(&it, namespace, ancestor_name,
+							     strlen(ancestor_name), &(uint64_t){DW_TAG_namespace}, 1);
 			if (err)
 				goto err;
 			index_die = drgn_dwarf_index_iterator_next(&it);
-			if (!index_die && (tag == DW_TAG_class_type || tag == DW_TAG_structure_type)) {
-				uint64_t class_tags[] = {DW_TAG_class_type, DW_TAG_structure_type};
-				err = drgn_dwarf_index_iterator_init(&it, ns, name, strlen(name), class_tags, 2);
-				if (err)
-					goto err;
-				index_die = drgn_dwarf_index_iterator_next(&it);
-			}
 			if (!index_die) {
 				err = &drgn_not_found;
 				goto err;
 			}
-			ns = index_die->namespace;
+			namespace = index_die->namespace;
 		}
-		err = drgn_dwarf_index_iterator_init(&it, ns, name, strlen(name), &tag, 1);
+		err = drgn_dwarf_index_iterator_init(&it, namespace, name, strlen(name), &tag, 1);
 		if (err)
 			goto err;
 		index_die = drgn_dwarf_index_iterator_next(&it);
 		if (!index_die)
 			err = &drgn_not_found;
 	err:
-		str_vector_deinit(&vec);
+		free(ancestors);
 		if (err)
 			return err;
 	}
